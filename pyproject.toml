@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forgejo-lxd-runner"
+version = "0.1.0"
+description = "Forgejo Runner act backend plugin that executes jobs in LXD instances"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "vicamo" }]
+keywords = ["forgejo", "runner", "lxd", "act", "plugin", "grpc"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    "grpcio>=1.60",
+    "grpcio-health-checking>=1.60",
+    "protobuf>=4.25",
+]
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.60",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "grpc-stubs>=1.53",
+    "types-protobuf>=4.24",
+    "nox>=2024.4.15",
+]
+
+[project.scripts]
+forgejo-lxd-runner = "forgejo_lxd_runner.__main__:main"
+
+[project.urls]
+Homepage = "https://kernel.ubuntu.com/forgejo/vicamo/forgejo-lxd-runner"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"forgejo_lxd_runner" = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["src/forgejo_lxd_runner/proto"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+exclude = ["src/forgejo_lxd_runner/proto/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
