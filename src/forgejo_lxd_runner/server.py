@@ -379,6 +379,23 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # forwarded so LXD produces the descriptive error.
         if instance_type := request.backend_options.get("type"):
             config["type"] = instance_type
+        # ``ephemeral`` backend option: when truthy, LXD deletes the
+        # instance the moment it's stopped (config key ``ephemeral: true``).
+        # Belt-and-braces for the ``Remove`` path — if the instance gets
+        # stopped by anything else (host reboot, ``lxc stop`` from ops),
+        # LXD cleans up instead of leaving an orphan. Absent → LXD default
+        # (non-ephemeral). Accepted true values: ``true``, ``1``, ``yes``,
+        # ``on`` (case-insensitive).
+        if ephemeral := request.backend_options.get("ephemeral"):
+            if ephemeral.strip().lower() in {"true", "1", "yes", "on"}:
+                config["ephemeral"] = True
+            elif ephemeral.strip().lower() in {"false", "0", "no", "off", ""}:
+                config["ephemeral"] = False
+            else:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"ephemeral: expected boolean, got {ephemeral!r}",
+                )
         # ``profiles`` backend option: comma-separated list of LXD profile
         # names to apply. Absent (or empty after parsing) → LXD applies the
         # ``default`` profile, which is what most single-project setups want.

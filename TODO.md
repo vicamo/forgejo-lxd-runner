@@ -13,11 +13,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Backend options (workflow-author-facing knobs on `CreateRequest`)
 
-- [ ] `ephemeral`: parse the usual truthy/falsy strings
-      (`true/1/yes/on` and `false/0/no/off`, case + whitespace
-      insensitive) into `config["ephemeral"]`. Absent → LXD default.
-      Invalid → `INVALID_ARGUMENT`.
-
 ## Runtime / correctness
 
 - [ ] `_envs` leak audit: every RPC path that removes an instance must
