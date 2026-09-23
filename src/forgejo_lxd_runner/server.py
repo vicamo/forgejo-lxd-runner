@@ -225,6 +225,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         self,
         name: str = DEFAULT_NAME,
         max_environment_timeout: float | None = None,
+        instance_name_prefix: str = "",
     ) -> None:
         # The name is what Forgejo runner labels reference via the
         # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
@@ -248,6 +249,12 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             if max_environment_timeout and max_environment_timeout > 0
             else None
         )
+        # Prepended to every LXD instance name at Create time. The runner's
+        # ``environment_id`` (== ``CreateRequest.name``) is unchanged; only
+        # the LXD-side name is namespaced. Empty (default) preserves the
+        # previous 1:1 mapping. Operators set this to disambiguate multiple
+        # daemons sharing one LXD project — see ``--instance-name-prefix``.
+        self._instance_name_prefix = instance_name_prefix
 
     def _client_for(self, project: str | None) -> pylxd.Client:
         key = project or None
@@ -357,7 +364,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
 
         config: dict[str, object] = {
-            "name": name,
+            "name": self._instance_name_prefix + name,
             "source": {"type": "image", "alias": image},
         }
         # ``lxd_arch`` backend option: forces the LXD instance architecture

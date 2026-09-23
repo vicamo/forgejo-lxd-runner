@@ -30,12 +30,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Operational (operator-facing CLI flags)
 
-- [ ] `--instance-name-prefix STR` (default `""`): prepend to
-      `config["name"]` for the LXD instance. `environment_id` (the
-      runner's handle) stays raw; only the on-LXD instance name is
-      prefixed. No auto-generated default — random breaks restart
-      cleanup, hostname is often DNS-unsafe, PIDs recycle. Empty
-      default; operator sets it in the systemd unit if they want it.
 - [ ] `--cluster-target` CLI default for LXD cluster deployments;
       optional per-label override mechanism TBD.
 - [ ] `--remote NAME=URL[,cert=...,key=...]` (repeatable) operator-defined

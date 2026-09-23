@@ -62,6 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
             "smaller wins."
         ),
     )
+    p.add_argument(
+        "--instance-name-prefix",
+        default="",
+        help=(
+            "String prepended to every LXD instance name. The runner's "
+            "environment_id is unchanged; only the LXD-side name is "
+            "namespaced. Default empty (1:1 mapping). Set this when "
+            "multiple daemons share one LXD project."
+        ),
+    )
     return p
 
 
@@ -71,6 +81,7 @@ def serve(
     name: str = BackendPluginService.DEFAULT_NAME,
     health_check_interval: float = 10.0,
     max_environment_timeout: float = 0.0,
+    instance_name_prefix: str = "",
 ) -> None:
     from .proto.plugin.v1alpha import plugin_pb2_grpc
 
@@ -78,7 +89,9 @@ def serve(
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
 
     backend_service = BackendPluginService(
-        name=name, max_environment_timeout=max_environment_timeout
+        name=name,
+        max_environment_timeout=max_environment_timeout,
+        instance_name_prefix=instance_name_prefix,
     )
     plugin_pb2_grpc.add_BackendPluginServicer_to_server(backend_service, server)  # type: ignore[no-untyped-call]
 
@@ -115,6 +128,7 @@ def main() -> None:
         args.name,
         args.health_check_interval,
         args.max_environment_timeout,
+        args.instance_name_prefix,
     )
 
 
