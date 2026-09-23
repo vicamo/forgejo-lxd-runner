@@ -129,3 +129,62 @@ def test_create_omits_architecture_when_option_absent(
 
     (config,), _ = mock_pylxd_client.instances.create.call_args
     assert "architecture" not in config
+
+
+def test_create_honours_project_backend_option(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = "x86_64"
+    created.expanded_config = {"image.os": "ubuntu"}
+    mock_pylxd_client.instances.create.return_value = created
+
+    resp = service.Create(_req(backend_options={"project": "ci"}), context)
+
+    # A project-bound Client was constructed.
+    mock_pylxd_client.factory.assert_any_call(project="ci")
+    assert resp.environment_id == "job-1"
+    # Env remembers the project so Start / Exec / Remove hit the same one.
+    assert service._envs["job-1"].project == "ci"  # noqa: SLF001
+
+
+def test_create_reuses_project_client(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job"
+    created.architecture = "x86_64"
+    mock_pylxd_client.instances.create.return_value = created
+
+    service.Create(_req(name="job-a", backend_options={"project": "ci"}), context)
+    service.Create(_req(name="job-b", backend_options={"project": "ci"}), context)
+
+    # One project=ci Client for both creates — the cache saves the second
+    # socket open.
+    project_calls = [
+        c for c in mock_pylxd_client.factory.call_args_list if c.kwargs.get("project") == "ci"
+    ]
+    assert len(project_calls) == 1
+
+
+def test_create_without_project_uses_default_client(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = "x86_64"
+    mock_pylxd_client.instances.create.return_value = created
+
+    service.Create(_req(), context)
+
+    # No ``project=`` kwarg was passed — the default Client() covers it.
+    for call in mock_pylxd_client.factory.call_args_list:
+        assert "project" not in call.kwargs
+    assert service._envs["job-1"].project is None  # noqa: SLF001

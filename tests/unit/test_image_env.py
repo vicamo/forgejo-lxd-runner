@@ -56,8 +56,9 @@ def _service_with_instance(instance):
     # Bypass __init__ — we only need the bits Start touches.
     service._lock = __import__("threading").Lock()
     service._envs = {"env-1": _Env(instance_name="env-1")}
-    service._client = MagicMock()
-    service._client.instances.get.return_value = instance
+    client = MagicMock()
+    client.instances.get.return_value = instance
+    service._clients = {None: client}
     return service
 
 

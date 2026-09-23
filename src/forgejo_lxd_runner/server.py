@@ -148,10 +148,11 @@ def _lxd_os_to_gha(image_os: str) -> str:
 class _Env:
     """Per-environment state tracked by the plugin."""
 
-    __slots__ = ("instance_name",)
+    __slots__ = ("instance_name", "project")
 
-    def __init__(self, instance_name: str) -> None:
+    def __init__(self, instance_name: str, project: str | None = None) -> None:
         self.instance_name = instance_name
+        self.project = project
 
 
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
@@ -173,11 +174,22 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # with its own connection settings — and address them
         # independently from a single runner config.
         self.name = name
-        # No endpoint / cert args yet: pylxd auto-detects the local socket
-        # and lands in the ``default`` project.
-        self._client = pylxd.Client()
         self._envs: dict[str, _Env] = {}
         self._lock = threading.Lock()
+        # One pylxd Client per project (pylxd binds ``project`` at Client
+        # construction time, not per-call). ``None`` keys the default
+        # client — created lazily on the first RPC, which is always
+        # ``Capabilities`` right after the plugin starts.
+        self._clients: dict[str | None, pylxd.Client] = {}
+
+    def _client_for(self, project: str | None) -> pylxd.Client:
+        key = project or None
+        with self._lock:
+            client = self._clients.get(key)
+            if client is None:
+                client = pylxd.Client(project=project) if project else pylxd.Client()
+                self._clients[key] = client
+        return client
 
     # ------------------------------------------------------------------
     # helpers
@@ -194,7 +206,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     def _instance(self, context: grpc.ServicerContext, env_id: str) -> Any:
         env = self._lookup(context, env_id)
         try:
-            return self._client.instances.get(env.instance_name)
+            return self._client_for(env.project).instances.get(env.instance_name)
         except NotFound as exc:
             context.abort(
                 grpc.StatusCode.NOT_FOUND,
@@ -242,14 +254,20 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # descriptive error.
         if lxd_arch := request.backend_options.get("lxd_arch"):
             config["architecture"] = lxd_arch
+        # ``project`` backend option: create the instance inside the named
+        # LXD project (features.* on the project decide isolation scope).
+        # When absent, pylxd's default client stays in whatever project it
+        # discovered — usually ``default``.
+        project = request.backend_options.get("project") or None
+        client = self._client_for(project)
         try:
-            instance = self._client.instances.create(config, wait=True)
+            instance = client.instances.create(config, wait=True)
         except LXDAPIException as exc:
             context.abort(grpc.StatusCode.INTERNAL, f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc
 
         with self._lock:
-            self._envs[name] = _Env(instance_name=instance.name)
+            self._envs[name] = _Env(instance_name=instance.name, project=project)
 
         log.info("created environment %s from image %s", name, image)
 
@@ -417,7 +435,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             return plugin_pb2.RemoveResponse()
 
         try:
-            instance = self._client.instances.get(env.instance_name)
+            instance = self._client_for(env.project).instances.get(env.instance_name)
         except NotFound:
             return plugin_pb2.RemoveResponse()
 

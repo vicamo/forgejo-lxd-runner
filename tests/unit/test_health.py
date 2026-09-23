@@ -11,7 +11,7 @@ from forgejo_lxd_runner.health import HealthService
 
 def _service_with_client(client: MagicMock) -> MagicMock:
     service = MagicMock()
-    service._client = client
+    service._client_for.return_value = client
     return service
 
 

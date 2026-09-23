@@ -36,10 +36,16 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def mock_pylxd_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Patch ``pylxd.Client`` used by ``server.py`` and return the instance."""
+    """Patch ``pylxd.Client`` used by ``server.py`` and return the instance.
+
+    The returned mock exposes a ``factory`` attribute — the patched
+    ``pylxd.Client`` class itself — so tests can assert on constructor
+    arguments (e.g. ``project=...``).
+    """
     client = MagicMock(name="pylxd.Client()")
     factory = MagicMock(name="pylxd.Client", return_value=client)
     monkeypatch.setattr("forgejo_lxd_runner.server.pylxd.Client", factory)
+    client.factory = factory
     return client
 
 

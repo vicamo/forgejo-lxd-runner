@@ -13,10 +13,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Backend options (workflow-author-facing knobs on `CreateRequest`)
 
-- [ ] `project`: run the instance under a named LXD project (per-tenant
-      quotas, network isolation, ACLs). Requires a per-project pylxd
-      client cache — `pylxd.Client(project=…)` binds the project at
-      construction time, so we need one Client per project seen.
 - [ ] `profiles`: comma-separated LXD profile names applied to the
       instance. Whitespace-stripped, empty entries dropped; when the
       key is absent or effectively empty, LXD applies its own
