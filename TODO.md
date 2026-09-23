@@ -13,10 +13,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Backend options (workflow-author-facing knobs on `CreateRequest`)
 
-- [ ] Derive `RUNNER_OS` from the LXD image metadata so the standard
-      GHA-compatible `RUNNER_OS` / `RUNNER_ARCH` environment variables
-      are set correctly inside the instance without the workflow
-      author naming them.
 - [ ] `project`: run the instance under a named LXD project (per-tenant
       quotas, network isolation, ACLs). Requires a per-project pylxd
       client cache — `pylxd.Client(project=…)` binds the project at

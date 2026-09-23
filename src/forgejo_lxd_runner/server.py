@@ -114,6 +114,37 @@ def _lxd_arch_to_gha(lxd_arch: str) -> str:
     return _LXD_ARCH_TO_GHA.get(lxd_arch, lxd_arch)
 
 
+# Map LXD's ``image.os`` metadata property to GHA's ``RUNNER_OS`` /
+# ``runner.os`` value. GHA inherits its vocabulary from the .NET
+# ``System.Runtime.InteropServices.OSPlatform`` type (``Linux``, ``Windows``,
+# ``OSX``, ``FreeBSD``), matching what GitHub-hosted runners set.
+#
+# .NET reference:
+#   https://learn.microsoft.com/dotnet/api/system.runtime.interopservices.osplatform
+# LXD image metadata (``os`` property comes from simplestreams and image.yaml):
+#   https://documentation.ubuntu.com/lxd/latest/reference/image_format/
+# GHA ``RUNNER_OS`` contract:
+#   https://docs.github.com/actions/learn-github-actions/variables#default-environment-variables
+#
+# The set of non-Linux OSes LXD actually supports is tiny: FreeBSD (container
+# or VM) and Windows (VM only). Everything else — ubuntu, debian, alpine,
+# arch, fedora, centos, rocky, almalinux, opensuse, void, nixos, gentoo,
+# oracle, openwrt, plamo, slackware — is Linux, so we default to that.
+_LXD_OS_TO_GHA: dict[str, str] = {
+    "freebsd": "FreeBSD",
+    "windows": "Windows",
+}
+
+
+def _lxd_os_to_gha(image_os: str) -> str:
+    """Translate LXD ``image.os`` to GHA's ``RUNNER_OS`` value.
+
+    Defaults to ``Linux`` — the overwhelming majority of LXD images, and
+    the safe fallback when metadata is missing on custom images.
+    """
+    return _LXD_OS_TO_GHA.get(image_os.lower(), "Linux")
+
+
 class _Env:
     """Per-environment state tracked by the plugin."""
 
@@ -229,7 +260,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             act_path="/root/actions-runner/act",
             tool_cache_path="/opt/hostedtoolcache",
             temp_path="/tmp",
-            os="Linux",
+            os=_lxd_os_to_gha(instance.expanded_config.get("image.os", "")),
             arch=_lxd_arch_to_gha(instance.architecture),
         )
 

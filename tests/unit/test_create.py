@@ -26,6 +26,7 @@ def test_create_launches_instance_from_label_arg(
     created = MagicMock(name="lxd_instance")
     created.name = "job-1"
     created.architecture = "x86_64"
+    created.expanded_config = {"image.os": "ubuntu"}
     mock_pylxd_client.instances.create.return_value = created
 
     resp = service.Create(_req(), context)
