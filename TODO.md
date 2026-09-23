@@ -20,11 +20,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Runtime / correctness
 
-- [ ] Map LXD HTTP errors to gRPC status codes so the runner's retry
-      logic distinguishes "operator misconfigured" from "LXD is
-      broken": 400/409/422 → `INVALID_ARGUMENT`, 404 → `NOT_FOUND`,
-      403 → `PERMISSION_DENIED`, everything else → `INTERNAL`. Apply
-      at every `context.abort` site.
 - [ ] Honour `CreateRequest.environment_timeout` with a plugin-side
       cap (`--max-environment-timeout SECONDS`, default 0 = disabled).
       pylxd's `wait_for_operation` has no timeout parameter, so wrap

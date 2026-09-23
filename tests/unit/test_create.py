@@ -77,6 +77,36 @@ def test_create_maps_lxd_failure_to_internal(
 
 
 @pytest.mark.parametrize(
+    ("status", "grpc_code"),
+    [
+        (400, grpc.StatusCode.INVALID_ARGUMENT),
+        (404, grpc.StatusCode.NOT_FOUND),
+        (403, grpc.StatusCode.PERMISSION_DENIED),
+    ],
+)
+def test_create_maps_lxd_user_errors_to_client_status(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+    aborted: type[Exception],
+    status: int,
+    grpc_code: grpc.StatusCode,
+) -> None:
+    """A user-facing LXD error surfaces as a client-side gRPC status.
+
+    Prevents the runner from mistaking config typos (unknown profile,
+    missing project) for INTERNAL failures and retrying them forever.
+    """
+    mock_pylxd_client.instances.create.side_effect = LXDAPIException(
+        MagicMock(json=lambda: {"error": "x"}, status_code=status)
+    )
+    with pytest.raises(aborted) as exc:
+        service.Create(_req(), context)
+    assert exc.value.code == grpc_code  # type: ignore[attr-defined]
+    assert "job-1" not in service._envs  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
     ("lxd_arch", "reported_arch", "gha_arch"),
     [
         ("x86_64", "x86_64", "X64"),

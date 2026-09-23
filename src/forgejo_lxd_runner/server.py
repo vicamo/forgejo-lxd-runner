@@ -63,6 +63,27 @@ def _image_env_from_instance(instance: Any) -> dict[str, str]:
 _COPY_CHUNK_SIZE = 256 * 1024
 
 
+# LXD → gRPC status code mapping. Applied at every ``context.abort`` inside
+# a ``LXDAPIException`` catch. The runner uses gRPC status to decide whether
+# to retry vs surface to the workflow author — reporting a user config
+# mistake (unknown profile, typo'd project) as INTERNAL turns a fast "fix
+# your label" error into a retry loop, so give each class of failure the
+# status code it deserves.
+def _lxd_error_to_grpc(exc: LXDAPIException) -> grpc.StatusCode:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (400, 409, 422):
+        # 400 bad request, 409 conflict (name already used), 422 unprocessable.
+        return grpc.StatusCode.INVALID_ARGUMENT
+    if status == 404:
+        # Missing project / profile / image / instance.
+        return grpc.StatusCode.NOT_FOUND
+    if status == 403:
+        # Client cert not trusted, project ACL denied, etc.
+        return grpc.StatusCode.PERMISSION_DENIED
+    # 500 and anything unclassified — the plugin/LXD had a bad day.
+    return grpc.StatusCode.INTERNAL
+
+
 # Map LXD architecture names (kernel / ``uname -m`` style) to the values GitHub
 # Actions exposes as ``RUNNER_ARCH`` and ``runner.arch``. GHA inherits its
 # vocabulary from the .NET ``System.Runtime.InteropServices.Architecture``
@@ -285,7 +306,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         try:
             instance = client.instances.create(config, wait=True)
         except LXDAPIException as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd create {image!r}: {exc}")
+            context.abort(_lxd_error_to_grpc(exc), f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc
 
         with self._lock:
@@ -314,7 +335,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             if instance.status_code != _LXD_STATUS_RUNNING:
                 instance.start(wait=True)
         except LXDAPIException as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd start: {exc}")
+            context.abort(_lxd_error_to_grpc(exc), f"lxd start: {exc}")
 
         log.info("started environment %s", request.environment_id)
         image_env = _image_env_from_instance(instance)
@@ -413,7 +434,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 instance.execute(["mkdir", "-p", dest_path])
                 instance.files.recursive_put(tmp, dest_path)
             except LXDAPIException as exc:
-                context.abort(grpc.StatusCode.INTERNAL, f"CopyIn: {exc}")
+                context.abort(_lxd_error_to_grpc(exc), f"CopyIn: {exc}")
 
         return plugin_pb2.CopyInResponse()
 
@@ -429,7 +450,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             try:
                 instance.files.recursive_get(src, tmp)
             except LXDAPIException as exc:
-                context.abort(grpc.StatusCode.INTERNAL, f"CopyOut: {exc}")
+                context.abort(_lxd_error_to_grpc(exc), f"CopyOut: {exc}")
 
             buf = io.BytesIO()
             with tarfile.open(fileobj=buf, mode="w") as tar:
@@ -466,7 +487,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 instance.stop(force=True, wait=True)
             instance.delete(wait=True)
         except LXDAPIException as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd remove: {exc}")
+            context.abort(_lxd_error_to_grpc(exc), f"lxd remove: {exc}")
 
         log.info("removed environment %s", env_id)
         return plugin_pb2.RemoveResponse()
