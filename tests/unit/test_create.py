@@ -234,3 +234,39 @@ def test_create_omits_profiles_when_effectively_empty(
 
     (config,), _ = mock_pylxd_client.instances.create.call_args
     assert "profiles" not in config
+
+
+@pytest.mark.parametrize(
+    "instance_type", ["container", "virtual-machine", "unknown-type-passthrough"]
+)
+def test_create_passes_type(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+    instance_type: str,
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = "x86_64"
+    mock_pylxd_client.instances.create.return_value = created
+
+    service.Create(_req(backend_options={"type": instance_type}), context)
+
+    (config,), _ = mock_pylxd_client.instances.create.call_args
+    assert config["type"] == instance_type
+
+
+def test_create_omits_type_when_option_absent(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = "x86_64"
+    mock_pylxd_client.instances.create.return_value = created
+
+    service.Create(_req(), context)
+
+    (config,), _ = mock_pylxd_client.instances.create.call_args
+    assert "type" not in config

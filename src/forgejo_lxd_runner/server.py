@@ -254,6 +254,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # descriptive error.
         if lxd_arch := request.backend_options.get("lxd_arch"):
             config["architecture"] = lxd_arch
+        # ``type`` backend option: LXD instance type — ``container`` (default)
+        # or ``virtual-machine``. LXD vocabulary; unknown values are
+        # forwarded so LXD produces the descriptive error.
+        if instance_type := request.backend_options.get("type"):
+            config["type"] = instance_type
         # ``profiles`` backend option: comma-separated list of LXD profile
         # names to apply. Absent (or empty after parsing) → LXD applies the
         # ``default`` profile, which is what most single-project setups want.
