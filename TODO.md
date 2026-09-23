@@ -13,9 +13,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Backend options (workflow-author-facing knobs on `CreateRequest`)
 
-- [ ] `lxd_arch`: LXD-native architecture name (`x86_64`, `aarch64`, …)
-      forwarded verbatim to the instance config so cluster placement
-      picks a matching node.
 - [ ] Derive `RUNNER_OS` from the LXD image metadata so the standard
       GHA-compatible `RUNNER_OS` / `RUNNER_ARCH` environment variables
       are set correctly inside the instance without the workflow

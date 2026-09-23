@@ -25,6 +25,7 @@ def test_create_launches_instance_from_label_arg(
 ) -> None:
     created = MagicMock(name="lxd_instance")
     created.name = "job-1"
+    created.architecture = "x86_64"
     mock_pylxd_client.instances.create.return_value = created
 
     resp = service.Create(_req(), context)
@@ -37,8 +38,8 @@ def test_create_launches_instance_from_label_arg(
         wait=True,
     )
     assert resp.environment_id == "job-1"
-    assert resp.os == "linux"
-    assert resp.arch == "amd64"
+    assert resp.os == "Linux"
+    assert resp.arch == "X64"
     # Registered in the internal map.
     assert "job-1" in service._envs  # noqa: SLF001
 
@@ -72,3 +73,58 @@ def test_create_maps_lxd_failure_to_internal(
         service.Create(_req(), context)
     assert exc.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
     assert "job-1" not in service._envs  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("lxd_arch", "reported_arch", "gha_arch"),
+    [
+        ("x86_64", "x86_64", "X64"),
+        ("aarch64", "aarch64", "ARM64"),
+        ("armv7l", "armv7l", "ARM"),
+        ("s390x", "s390x", "S390x"),
+        ("ppc64le", "ppc64le", "Ppc64le"),
+        ("riscv64", "riscv64", "RiscV64"),
+        # Unknown-to-us LXD string: forwarded verbatim, echoed back in RUNNER_ARCH.
+        ("sparc64", "sparc64", "sparc64"),
+    ],
+)
+def test_create_honours_lxd_arch_backend_option(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+    lxd_arch: str,
+    reported_arch: str,
+    gha_arch: str,
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = reported_arch
+    mock_pylxd_client.instances.create.return_value = created
+
+    resp = service.Create(_req(backend_options={"lxd_arch": lxd_arch}), context)
+
+    mock_pylxd_client.instances.create.assert_called_once_with(
+        {
+            "name": "job-1",
+            "source": {"type": "image", "alias": "ubuntu/24.04"},
+            "architecture": lxd_arch,
+        },
+        wait=True,
+    )
+    assert resp.arch == gha_arch
+
+
+def test_create_omits_architecture_when_option_absent(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = "x86_64"
+    mock_pylxd_client.instances.create.return_value = created
+
+    service.Create(_req(), context)
+
+    (config,), _ = mock_pylxd_client.instances.create.call_args
+    assert "architecture" not in config

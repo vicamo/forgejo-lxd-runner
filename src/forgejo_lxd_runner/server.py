@@ -63,6 +63,57 @@ def _image_env_from_instance(instance: Any) -> dict[str, str]:
 _COPY_CHUNK_SIZE = 256 * 1024
 
 
+# Map LXD architecture names (kernel / ``uname -m`` style) to the values GitHub
+# Actions exposes as ``RUNNER_ARCH`` and ``runner.arch``. GHA inherits its
+# vocabulary from the .NET ``System.Runtime.InteropServices.Architecture``
+# enum via the Azure Pipelines agent, so we map every value the enum defines
+# and pass everything else through untouched (best-effort — LXD may run on
+# platforms .NET has no name for).
+#
+# .NET enum reference (all values across .NET versions):
+#   https://learn.microsoft.com/dotnet/api/system.runtime.interopservices.architecture
+# LXD architecture names come from ``shared/osarch/architectures.go``:
+#   https://github.com/canonical/lxd/blob/main/shared/osarch/architectures.go
+# GHA ``RUNNER_ARCH`` contract:
+#   https://docs.github.com/actions/learn-github-actions/variables#default-environment-variables
+_LXD_ARCH_TO_GHA: dict[str, str] = {
+    # .NET: X86 (Core 1.0) — 32-bit x86
+    "i686": "X86",
+    "i386": "X86",
+    # .NET: X64 (Core 1.0) — 64-bit x86 / amd64 / x86_64
+    "x86_64": "X64",
+    # .NET: Arm (Core 1.0) — 32-bit ARMv7
+    "armv7l": "ARM",
+    # .NET: Armv6 (.NET 7) — 32-bit ARMv6 (e.g. Raspberry Pi Zero). GHA has
+    # no separate token; RUNNER_ARCH lumps this under ARM.
+    "armv6l": "ARM",
+    # .NET: Arm64 (Core 3.0) — 64-bit ARM / AArch64
+    "aarch64": "ARM64",
+    # .NET: S390x (.NET 6) — IBM Z, big-endian
+    "s390x": "S390x",
+    # .NET: Ppc64le (.NET 7) — 64-bit little-endian POWER
+    "ppc64le": "Ppc64le",
+    # .NET: LoongArch64 (.NET 7)
+    "loongarch64": "LoongArch64",
+    # .NET: RiscV64 (.NET 8)
+    "riscv64": "RiscV64",
+    # .NET: Wasm (.NET 5) — WebAssembly. LXD never reports this, but included
+    # for completeness so the mapping mirrors the enum 1:1.
+    "wasm32": "Wasm",
+    "wasm64": "Wasm",
+}
+
+
+def _lxd_arch_to_gha(lxd_arch: str) -> str:
+    """Translate an LXD architecture string into GHA's ``RUNNER_ARCH`` value.
+
+    Unknown architectures pass through unchanged — they still populate
+    ``RUNNER_ARCH`` and ``runner.arch``, which is more useful than an empty
+    string for workflows that grew their own detection.
+    """
+    return _LXD_ARCH_TO_GHA.get(lxd_arch, lxd_arch)
+
+
 class _Env:
     """Per-environment state tracked by the plugin."""
 
@@ -149,10 +200,17 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if not name:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
 
-        config = {
+        config: dict[str, object] = {
             "name": name,
             "source": {"type": "image", "alias": image},
         }
+        # ``lxd_arch`` backend option: forces the LXD instance architecture
+        # (LXD vocabulary, e.g. ``x86_64`` / ``aarch64``). When absent, LXD
+        # picks it from the image. Unknown values are passed through so LXD
+        # can validate against its own architecture list and produce a
+        # descriptive error.
+        if lxd_arch := request.backend_options.get("lxd_arch"):
+            config["architecture"] = lxd_arch
         try:
             instance = self._client.instances.create(config, wait=True)
         except LXDAPIException as exc:
@@ -164,15 +222,15 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
         log.info("created environment %s from image %s", name, image)
 
-        # TODO: discover os/arch and expose a knob for the paths.
+        # TODO: expose a knob for the paths.
         return plugin_pb2.CreateResponse(
             environment_id=name,
             root_path="/root/actions-runner",
             act_path="/root/actions-runner/act",
             tool_cache_path="/opt/hostedtoolcache",
             temp_path="/tmp",
-            os="linux",
-            arch="amd64",
+            os="Linux",
+            arch=_lxd_arch_to_gha(instance.architecture),
         )
 
     def Start(  # noqa: N802
