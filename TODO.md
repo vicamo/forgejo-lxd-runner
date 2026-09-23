@@ -20,10 +20,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Runtime / correctness
 
-- [ ] Avoid holding `self._lock` across the blocking
-      `pylxd.Client(project=…)` construction. Double-checked locking
-      in `_client_for`: fast-path lock-free dict read, take the lock
-      only on cache miss, re-check under the lock.
 - [ ] Map LXD HTTP errors to gRPC status codes so the runner's retry
       logic distinguishes "operator misconfigured" from "LXD is
       broken": 400/409/422 → `INVALID_ARGUMENT`, 404 → `NOT_FOUND`,

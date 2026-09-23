@@ -184,6 +184,14 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
     def _client_for(self, project: str | None) -> pylxd.Client:
         key = project or None
+        # Fast path: dict reads are atomic under the GIL, so a hit doesn't
+        # need the lock. On miss, re-check under the lock so we don't open
+        # a second pylxd Client racing another thread — and, crucially,
+        # keep the potentially-slow ``pylxd.Client(...)`` constructor from
+        # blocking every other _client_for() caller.
+        client = self._clients.get(key)
+        if client is not None:
+            return client
         with self._lock:
             client = self._clients.get(key)
             if client is None:
