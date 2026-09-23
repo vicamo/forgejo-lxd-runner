@@ -188,3 +188,49 @@ def test_create_without_project_uses_default_client(
     for call in mock_pylxd_client.factory.call_args_list:
         assert "project" not in call.kwargs
     assert service._envs["job-1"].project is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ci", ["ci"]),
+        ("ci,gpu", ["ci", "gpu"]),
+        ("  ci ,  gpu  ", ["ci", "gpu"]),  # whitespace tolerated
+        ("ci,,gpu", ["ci", "gpu"]),  # empty entries dropped
+    ],
+)
+def test_create_passes_profiles(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+    raw: str,
+    expected: list[str],
+) -> None:
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = "x86_64"
+    mock_pylxd_client.instances.create.return_value = created
+
+    service.Create(_req(backend_options={"profiles": raw}), context)
+
+    (config,), _ = mock_pylxd_client.instances.create.call_args
+    assert config["profiles"] == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", ",,,", " , , "])
+def test_create_omits_profiles_when_effectively_empty(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_pylxd_client: MagicMock,
+    raw: str,
+) -> None:
+    """Empty / whitespace-only value → let LXD apply the ``default`` profile."""
+    created = MagicMock(name="lxd_instance")
+    created.name = "job-1"
+    created.architecture = "x86_64"
+    mock_pylxd_client.instances.create.return_value = created
+
+    service.Create(_req(backend_options={"profiles": raw}), context)
+
+    (config,), _ = mock_pylxd_client.instances.create.call_args
+    assert "profiles" not in config
