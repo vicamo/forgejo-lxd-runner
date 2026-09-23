@@ -94,6 +94,17 @@ def proto(session: nox.Session) -> None:
         if pkg_dir.is_dir():
             (pkg_dir / "__init__.py").touch()
 
+    # protoc emits absolute imports rooted at the proto package (e.g.
+    # ``from plugin.v1alpha import plugin_pb2``). Rewrite them to be
+    # rooted at our Python package so nothing depends on sys.path shape.
+    package_prefix = ".".join(PROTO_OUT.relative_to("src").parts)
+    for py in PROTO_OUT.rglob("*_pb2*.py"):
+        text = py.read_text()
+        # Only two shapes protoc uses at import time.
+        text = text.replace("from plugin.v1alpha ", f"from {package_prefix}.plugin.v1alpha ")
+        text = text.replace("import plugin.v1alpha.", f"import {package_prefix}.plugin.v1alpha.")
+        py.write_text(text)
+
 
 @nox.session
 def lint(session: nox.Session) -> None:
@@ -119,4 +130,12 @@ def type(session: nox.Session) -> None:
 @nox.session(python=PYTHON_VERSIONS)
 def tests(session: nox.Session) -> None:
     session.install("-e", ".[dev]")
-    session.run("pytest", *session.posargs)
+    session.run("pytest", "tests/unit", "tests/grpc", "tests/test_version.py", *session.posargs)
+
+
+@nox.session
+def e2e(session: nox.Session) -> None:
+    """Run the LXD end-to-end smoke test. Requires a working local LXD."""
+    session.install("-e", ".[dev]")
+    session.env["FORGEJO_LXD_E2E"] = "1"
+    session.run("pytest", "tests/e2e", *session.posargs)
