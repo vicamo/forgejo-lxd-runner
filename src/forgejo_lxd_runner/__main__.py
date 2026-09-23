@@ -51,6 +51,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Root logger level (case-insensitive). Default: INFO.",
     )
+    p.add_argument(
+        "--max-environment-timeout",
+        type=float,
+        default=0.0,
+        help=(
+            "Upper bound (seconds) on how long Create will wait for LXD to "
+            "provision an instance. 0 disables the cap; the runner-supplied "
+            "environment_timeout is honoured as-is. When both are set the "
+            "smaller wins."
+        ),
+    )
     return p
 
 
@@ -59,13 +70,16 @@ def serve(
     workers: int,
     name: str = BackendPluginService.DEFAULT_NAME,
     health_check_interval: float = 10.0,
+    max_environment_timeout: float = 0.0,
 ) -> None:
     from .proto.plugin.v1alpha import plugin_pb2_grpc
 
     log.info("forgejo-lxd-runner %s starting", __version__)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
 
-    backend_service = BackendPluginService(name=name)
+    backend_service = BackendPluginService(
+        name=name, max_environment_timeout=max_environment_timeout
+    )
     plugin_pb2_grpc.add_BackendPluginServicer_to_server(backend_service, server)  # type: ignore[no-untyped-call]
 
     health_service = HealthService(backend_service, interval=health_check_interval)
@@ -95,7 +109,13 @@ def main() -> None:
         level=args.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    serve(args.address, args.workers, args.name, args.health_check_interval)
+    serve(
+        args.address,
+        args.workers,
+        args.name,
+        args.health_check_interval,
+        args.max_environment_timeout,
+    )
 
 
 if __name__ == "__main__":

@@ -19,12 +19,13 @@ Known simplifications, all called out in code:
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import logging
 import tarfile
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,38 @@ def _image_env_from_instance(instance: Any) -> dict[str, str]:
 
 
 _COPY_CHUNK_SIZE = 256 * 1024
+
+
+class _TimedOut(Exception):
+    """Raised by ``_run_with_timeout`` when the wrapped call didn't finish."""
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__(f"timed out after {timeout}s")
+        self.timeout = timeout
+
+
+def _run_with_timeout(func: Callable[[], Any], timeout: float | None) -> Any:
+    """Run ``func()`` synchronously, but abandon it after ``timeout`` seconds.
+
+    pylxd's ``instances.create(wait=True)`` blocks on LXD's operation-wait
+    endpoint indefinitely — there's no ``timeout=`` parameter through the
+    stack. Wrap it in a helper thread and use ``future.result(timeout)`` so
+    the caller regains control on schedule. The helper thread continues
+    running in the background (there's no clean way to abort a synchronous
+    HTTP call mid-flight); daemon=True keeps it from delaying interpreter
+    shutdown. Callers do best-effort cleanup on the LXD side.
+    """
+    if timeout is None:
+        return func()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(func)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            raise _TimedOut(timeout) from exc
+        finally:
+            # Let the pool tear down without waiting for the orphaned worker.
+            pool.shutdown(wait=False, cancel_futures=True)
 
 
 # LXD → gRPC status code mapping. Applied at every ``context.abort`` inside
@@ -188,7 +221,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     processes so each is addressable under a distinct scheme.
     """
 
-    def __init__(self, name: str = DEFAULT_NAME) -> None:
+    def __init__(
+        self,
+        name: str = DEFAULT_NAME,
+        max_environment_timeout: float | None = None,
+    ) -> None:
         # The name is what Forgejo runner labels reference via the
         # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
         # an operator run several plugin processes side by side — each
@@ -202,6 +239,15 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # client — created lazily on the first RPC, which is always
         # ``Capabilities`` right after the plugin starts.
         self._clients: dict[str | None, pylxd.Client] = {}
+        # Upper bound on how long ``Create`` will wait for LXD to finish
+        # provisioning an instance. ``None`` (or ``<=0``) means no cap;
+        # the runner-supplied ``environment_timeout`` is honoured as-is.
+        # See ``_effective_create_timeout`` for how the two combine.
+        self._max_create_timeout: float | None = (
+            max_environment_timeout
+            if max_environment_timeout and max_environment_timeout > 0
+            else None
+        )
 
     def _client_for(self, project: str | None) -> pylxd.Client:
         key = project or None
@@ -220,8 +266,46 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 self._clients[key] = client
         return client
 
-    # ------------------------------------------------------------------
-    # helpers
+    def _best_effort_delete(self, client: pylxd.Client, name: str) -> None:
+        """Attempt to remove a partially-provisioned instance.
+
+        Called from the create-timeout path — the runner has already given
+        up on this environment, so we ignore every failure (instance might
+        not exist yet, LXD might be unresponsive, cleanup might race a
+        still-running create operation). We only try to keep the LXD host
+        from accumulating orphan instances after a slow image copy.
+        """
+        try:
+            instance = client.instances.get(name)
+        except (LXDAPIException, NotFound):
+            return
+        try:
+            if instance.status_code == _LXD_STATUS_RUNNING:
+                instance.stop(force=True, wait=True)
+            instance.delete(wait=True)
+        except (LXDAPIException, NotFound):
+            log.warning("best-effort cleanup of %s failed", name, exc_info=True)
+
+    def _effective_create_timeout(self, request: plugin_pb2.CreateRequest) -> float | None:
+        """Combine runner-supplied and plugin-configured caps.
+
+        The runner's ``environment_timeout`` is the deadline the workflow
+        expects to be honoured; the plugin's ``max_environment_timeout``
+        protects the LXD host from a workflow claiming an absurdly long
+        setup budget. When both are set we take the smaller. ``0`` on
+        either side means "no bound from me" — the other still applies.
+        Returns ``None`` when neither bounds the call (wait forever, as
+        today).
+        """
+        runner = (
+            request.environment_timeout.ToNanoseconds() / 1e9
+            if request.HasField("environment_timeout")
+            else 0
+        )
+        cap = self._max_create_timeout
+        candidates = [t for t in (runner, cap) if t and t > 0]
+        return min(candidates) if candidates else None
+
     # ------------------------------------------------------------------
 
     def _lookup(self, context: grpc.ServicerContext, env_id: str) -> _Env:
@@ -303,8 +387,23 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # discovered — usually ``default``.
         project = request.backend_options.get("project") or None
         client = self._client_for(project)
+        timeout = self._effective_create_timeout(request)
         try:
-            instance = client.instances.create(config, wait=True)
+            instance = _run_with_timeout(
+                lambda: client.instances.create(config, wait=True),
+                timeout,
+            )
+        except _TimedOut as exc:
+            # Best-effort cleanup: LXD may have created (and even started)
+            # the instance while we timed out waiting. Fire-and-forget —
+            # a failed cleanup just leaks state; the runner is already
+            # aborting the job.
+            self._best_effort_delete(client, name)
+            context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                f"lxd create {image!r} exceeded {exc.timeout}s",
+            )
+            raise AssertionError("unreachable") from exc
         except LXDAPIException as exc:
             context.abort(_lxd_error_to_grpc(exc), f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc

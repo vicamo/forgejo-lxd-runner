@@ -20,14 +20,6 @@ same scope. The later sections are pure planning — nothing yet.
 
 ## Runtime / correctness
 
-- [ ] Honour `CreateRequest.environment_timeout` with a plugin-side
-      cap (`--max-environment-timeout SECONDS`, default 0 = disabled).
-      pylxd's `wait_for_operation` has no timeout parameter, so wrap
-      the blocking `instances.create` in a single-thread
-      `ThreadPoolExecutor` and call `future.result(timeout=…)`. On
-      timeout: best-effort delete the half-created instance and abort
-      `DEADLINE_EXCEEDED`. `Duration.ToSeconds()` truncates to int —
-      use `ToNanoseconds() / 1e9`.
 - [ ] `_envs` leak audit: every RPC path that removes an instance must
       also remove its `_envs` entry, and `Remove` must be idempotent
       on already-gone entries. Add a stress test that Creates + Removes
