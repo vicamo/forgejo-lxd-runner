@@ -83,7 +83,7 @@ class HealthService(health.HealthServicer):
             # ``/1.0`` is LXD's canonical liveness endpoint — it's what
             # ``pylxd.Client()`` itself hits to authenticate, so it's the
             # cheapest "is LXD alive?" round-trip we can make.
-            self._service._client.api["1.0"].get()  # noqa: SLF001
+            self._service._client_for(None).api["1.0"].get()  # noqa: SLF001
         except Exception:  # noqa: BLE001
             log.warning("LXD health probe failed", exc_info=True)
             return False

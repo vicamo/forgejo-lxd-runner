@@ -27,6 +27,7 @@ def test_create_start_remove_lifecycle(
     created = MagicMock(name="lxd_instance")
     created.name = "job-1"
     created.status_code = 102  # STOPPED
+    created.architecture = "x86_64"
     mock_pylxd_client.instances.create.return_value = created
     mock_pylxd_client.instances.get.return_value = created
 

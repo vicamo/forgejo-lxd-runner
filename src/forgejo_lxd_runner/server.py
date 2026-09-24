@@ -19,12 +19,13 @@ Known simplifications, all called out in code:
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import logging
 import tarfile
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -40,38 +41,278 @@ log = logging.getLogger(__name__)
 _LXD_STATUS_STOPPED = 102
 _LXD_STATUS_RUNNING = 103
 
+_IMAGE_ENV_PREFIX = "environment."
+
+
+def _image_env_from_instance(instance: Any) -> dict[str, str]:
+    """Extract image-baked env vars from an LXD instance.
+
+    LXD surfaces environment variables baked into the image (via the image's
+    own metadata, plus any layered profiles) as ``environment.<NAME>`` keys
+    on the instance's ``expanded_config``. We strip the prefix and hand
+    the resulting map to the runner as ``StartComplete.image_env`` so job
+    env vars can be layered on top of them.
+    """
+    config = getattr(instance, "expanded_config", None) or {}
+    return {
+        key[len(_IMAGE_ENV_PREFIX) :]: str(value)
+        for key, value in config.items()
+        if key.startswith(_IMAGE_ENV_PREFIX) and key != _IMAGE_ENV_PREFIX
+    }
+
+
 _COPY_CHUNK_SIZE = 256 * 1024
+
+
+class _TimedOut(Exception):
+    """Raised by ``_run_with_timeout`` when the wrapped call didn't finish."""
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__(f"timed out after {timeout}s")
+        self.timeout = timeout
+
+
+def _run_with_timeout(func: Callable[[], Any], timeout: float | None) -> Any:
+    """Run ``func()`` synchronously, but abandon it after ``timeout`` seconds.
+
+    pylxd's ``instances.create(wait=True)`` blocks on LXD's operation-wait
+    endpoint indefinitely — there's no ``timeout=`` parameter through the
+    stack. Wrap it in a helper thread and use ``future.result(timeout)`` so
+    the caller regains control on schedule. The helper thread continues
+    running in the background (there's no clean way to abort a synchronous
+    HTTP call mid-flight); daemon=True keeps it from delaying interpreter
+    shutdown. Callers do best-effort cleanup on the LXD side.
+    """
+    if timeout is None:
+        return func()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(func)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            raise _TimedOut(timeout) from exc
+        finally:
+            # Let the pool tear down without waiting for the orphaned worker.
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+# LXD → gRPC status code mapping. Applied at every ``context.abort`` inside
+# a ``LXDAPIException`` catch. The runner uses gRPC status to decide whether
+# to retry vs surface to the workflow author — reporting a user config
+# mistake (unknown profile, typo'd project) as INTERNAL turns a fast "fix
+# your label" error into a retry loop, so give each class of failure the
+# status code it deserves.
+def _lxd_error_to_grpc(exc: LXDAPIException) -> grpc.StatusCode:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (400, 409, 422):
+        # 400 bad request, 409 conflict (name already used), 422 unprocessable.
+        return grpc.StatusCode.INVALID_ARGUMENT
+    if status == 404:
+        # Missing project / profile / image / instance.
+        return grpc.StatusCode.NOT_FOUND
+    if status == 403:
+        # Client cert not trusted, project ACL denied, etc.
+        return grpc.StatusCode.PERMISSION_DENIED
+    # 500 and anything unclassified — the plugin/LXD had a bad day.
+    return grpc.StatusCode.INTERNAL
+
+
+# Map LXD architecture names (kernel / ``uname -m`` style) to the values GitHub
+# Actions exposes as ``RUNNER_ARCH`` and ``runner.arch``. GHA inherits its
+# vocabulary from the .NET ``System.Runtime.InteropServices.Architecture``
+# enum via the Azure Pipelines agent, so we map every value the enum defines
+# and pass everything else through untouched (best-effort — LXD may run on
+# platforms .NET has no name for).
+#
+# .NET enum reference (all values across .NET versions):
+#   https://learn.microsoft.com/dotnet/api/system.runtime.interopservices.architecture
+# LXD architecture names come from ``shared/osarch/architectures.go``:
+#   https://github.com/canonical/lxd/blob/main/shared/osarch/architectures.go
+# GHA ``RUNNER_ARCH`` contract:
+#   https://docs.github.com/actions/learn-github-actions/variables#default-environment-variables
+_LXD_ARCH_TO_GHA: dict[str, str] = {
+    # .NET: X86 (Core 1.0) — 32-bit x86
+    "i686": "X86",
+    "i386": "X86",
+    # .NET: X64 (Core 1.0) — 64-bit x86 / amd64 / x86_64
+    "x86_64": "X64",
+    # .NET: Arm (Core 1.0) — 32-bit ARMv7
+    "armv7l": "ARM",
+    # .NET: Armv6 (.NET 7) — 32-bit ARMv6 (e.g. Raspberry Pi Zero). GHA has
+    # no separate token; RUNNER_ARCH lumps this under ARM.
+    "armv6l": "ARM",
+    # .NET: Arm64 (Core 3.0) — 64-bit ARM / AArch64
+    "aarch64": "ARM64",
+    # .NET: S390x (.NET 6) — IBM Z, big-endian
+    "s390x": "S390x",
+    # .NET: Ppc64le (.NET 7) — 64-bit little-endian POWER
+    "ppc64le": "Ppc64le",
+    # .NET: LoongArch64 (.NET 7)
+    "loongarch64": "LoongArch64",
+    # .NET: RiscV64 (.NET 8)
+    "riscv64": "RiscV64",
+    # .NET: Wasm (.NET 5) — WebAssembly. LXD never reports this, but included
+    # for completeness so the mapping mirrors the enum 1:1.
+    "wasm32": "Wasm",
+    "wasm64": "Wasm",
+}
+
+
+def _lxd_arch_to_gha(lxd_arch: str) -> str:
+    """Translate an LXD architecture string into GHA's ``RUNNER_ARCH`` value.
+
+    Unknown architectures pass through unchanged — they still populate
+    ``RUNNER_ARCH`` and ``runner.arch``, which is more useful than an empty
+    string for workflows that grew their own detection.
+    """
+    return _LXD_ARCH_TO_GHA.get(lxd_arch, lxd_arch)
+
+
+# Map LXD's ``image.os`` metadata property to GHA's ``RUNNER_OS`` /
+# ``runner.os`` value. GHA inherits its vocabulary from the .NET
+# ``System.Runtime.InteropServices.OSPlatform`` type (``Linux``, ``Windows``,
+# ``OSX``, ``FreeBSD``), matching what GitHub-hosted runners set.
+#
+# .NET reference:
+#   https://learn.microsoft.com/dotnet/api/system.runtime.interopservices.osplatform
+# LXD image metadata (``os`` property comes from simplestreams and image.yaml):
+#   https://documentation.ubuntu.com/lxd/latest/reference/image_format/
+# GHA ``RUNNER_OS`` contract:
+#   https://docs.github.com/actions/learn-github-actions/variables#default-environment-variables
+#
+# The set of non-Linux OSes LXD actually supports is tiny: FreeBSD (container
+# or VM) and Windows (VM only). Everything else — ubuntu, debian, alpine,
+# arch, fedora, centos, rocky, almalinux, opensuse, void, nixos, gentoo,
+# oracle, openwrt, plamo, slackware — is Linux, so we default to that.
+_LXD_OS_TO_GHA: dict[str, str] = {
+    "freebsd": "FreeBSD",
+    "windows": "Windows",
+}
+
+
+def _lxd_os_to_gha(image_os: str) -> str:
+    """Translate LXD ``image.os`` to GHA's ``RUNNER_OS`` value.
+
+    Defaults to ``Linux`` — the overwhelming majority of LXD images, and
+    the safe fallback when metadata is missing on custom images.
+    """
+    return _LXD_OS_TO_GHA.get(image_os.lower(), "Linux")
 
 
 class _Env:
     """Per-environment state tracked by the plugin."""
 
-    __slots__ = ("instance_name",)
+    __slots__ = ("instance_name", "project")
 
-    def __init__(self, instance_name: str) -> None:
+    def __init__(self, instance_name: str, project: str | None = None) -> None:
         self.instance_name = instance_name
+        self.project = project
 
 
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     """LXD-backed implementation of ``plugin.v1alpha.BackendPlugin``."""
 
-    name = "lxd"
-    """Wire-protocol backend name returned by ``Capabilities``.
+    DEFAULT_NAME = "lxd"
+    """Default wire-protocol backend name returned by ``Capabilities``.
 
     Must match the plugin's scheme in the runner's ``plugins:`` config —
     labels like ``mylabel:lxd://<image>`` are routed to this backend.
-    Subclasses may override to reuse this service under a different scheme.
+    Override via the ``--name`` CLI flag when running multiple plugin
+    processes so each is addressable under a distinct scheme.
     """
 
-    def __init__(self) -> None:
-        # No endpoint / cert args yet: pylxd auto-detects the local socket
-        # and lands in the ``default`` project.
-        self._client = pylxd.Client()
+    def __init__(
+        self,
+        name: str = DEFAULT_NAME,
+        max_environment_timeout: float | None = None,
+        instance_name_prefix: str = "",
+    ) -> None:
+        # The name is what Forgejo runner labels reference via the
+        # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
+        # an operator run several plugin processes side by side — each
+        # with its own connection settings — and address them
+        # independently from a single runner config.
+        self.name = name
         self._envs: dict[str, _Env] = {}
         self._lock = threading.Lock()
+        # One pylxd Client per project (pylxd binds ``project`` at Client
+        # construction time, not per-call). ``None`` keys the default
+        # client — created lazily on the first RPC, which is always
+        # ``Capabilities`` right after the plugin starts.
+        self._clients: dict[str | None, pylxd.Client] = {}
+        # Upper bound on how long ``Create`` will wait for LXD to finish
+        # provisioning an instance. ``None`` (or ``<=0``) means no cap;
+        # the runner-supplied ``environment_timeout`` is honoured as-is.
+        # See ``_effective_create_timeout`` for how the two combine.
+        self._max_create_timeout: float | None = (
+            max_environment_timeout
+            if max_environment_timeout and max_environment_timeout > 0
+            else None
+        )
+        # Prepended to every LXD instance name at Create time. The runner's
+        # ``environment_id`` (== ``CreateRequest.name``) is unchanged; only
+        # the LXD-side name is namespaced. Empty (default) preserves the
+        # previous 1:1 mapping. Operators set this to disambiguate multiple
+        # daemons sharing one LXD project — see ``--instance-name-prefix``.
+        self._instance_name_prefix = instance_name_prefix
 
-    # ------------------------------------------------------------------
-    # helpers
+    def _client_for(self, project: str | None) -> pylxd.Client:
+        key = project or None
+        # Fast path: dict reads are atomic under the GIL, so a hit doesn't
+        # need the lock. On miss, re-check under the lock so we don't open
+        # a second pylxd Client racing another thread — and, crucially,
+        # keep the potentially-slow ``pylxd.Client(...)`` constructor from
+        # blocking every other _client_for() caller.
+        client = self._clients.get(key)
+        if client is not None:
+            return client
+        with self._lock:
+            client = self._clients.get(key)
+            if client is None:
+                client = pylxd.Client(project=project) if project else pylxd.Client()
+                self._clients[key] = client
+        return client
+
+    def _best_effort_delete(self, client: pylxd.Client, name: str) -> None:
+        """Attempt to remove a partially-provisioned instance.
+
+        Called from the create-timeout path — the runner has already given
+        up on this environment, so we ignore every failure (instance might
+        not exist yet, LXD might be unresponsive, cleanup might race a
+        still-running create operation). We only try to keep the LXD host
+        from accumulating orphan instances after a slow image copy.
+        """
+        try:
+            instance = client.instances.get(name)
+        except (LXDAPIException, NotFound):
+            return
+        try:
+            if instance.status_code == _LXD_STATUS_RUNNING:
+                instance.stop(force=True, wait=True)
+            instance.delete(wait=True)
+        except (LXDAPIException, NotFound):
+            log.warning("best-effort cleanup of %s failed", name, exc_info=True)
+
+    def _effective_create_timeout(self, request: plugin_pb2.CreateRequest) -> float | None:
+        """Combine runner-supplied and plugin-configured caps.
+
+        The runner's ``environment_timeout`` is the deadline the workflow
+        expects to be honoured; the plugin's ``max_environment_timeout``
+        protects the LXD host from a workflow claiming an absurdly long
+        setup budget. When both are set we take the smaller. ``0`` on
+        either side means "no bound from me" — the other still applies.
+        Returns ``None`` when neither bounds the call (wait forever, as
+        today).
+        """
+        runner = (
+            request.environment_timeout.ToNanoseconds() / 1e9
+            if request.HasField("environment_timeout")
+            else 0
+        )
+        cap = self._max_create_timeout
+        candidates = [t for t in (runner, cap) if t and t > 0]
+        return min(candidates) if candidates else None
+
     # ------------------------------------------------------------------
 
     def _lookup(self, context: grpc.ServicerContext, env_id: str) -> _Env:
@@ -85,7 +326,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     def _instance(self, context: grpc.ServicerContext, env_id: str) -> Any:
         env = self._lookup(context, env_id)
         try:
-            return self._client.instances.get(env.instance_name)
+            return self._client_for(env.project).instances.get(env.instance_name)
         except NotFound as exc:
             context.abort(
                 grpc.StatusCode.NOT_FOUND,
@@ -122,30 +363,89 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if not name:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
 
-        config = {
-            "name": name,
+        config: dict[str, object] = {
+            "name": self._instance_name_prefix + name,
             "source": {"type": "image", "alias": image},
         }
+        # ``lxd_arch`` backend option: forces the LXD instance architecture
+        # (LXD vocabulary, e.g. ``x86_64`` / ``aarch64``). When absent, LXD
+        # picks it from the image. Unknown values are passed through so LXD
+        # can validate against its own architecture list and produce a
+        # descriptive error.
+        if lxd_arch := request.backend_options.get("lxd_arch"):
+            config["architecture"] = lxd_arch
+        # ``type`` backend option: LXD instance type — ``container`` (default)
+        # or ``virtual-machine``. LXD vocabulary; unknown values are
+        # forwarded so LXD produces the descriptive error.
+        if instance_type := request.backend_options.get("type"):
+            config["type"] = instance_type
+        # ``ephemeral`` backend option: when truthy, LXD deletes the
+        # instance the moment it's stopped (config key ``ephemeral: true``).
+        # Belt-and-braces for the ``Remove`` path — if the instance gets
+        # stopped by anything else (host reboot, ``lxc stop`` from ops),
+        # LXD cleans up instead of leaving an orphan. Absent → LXD default
+        # (non-ephemeral). Accepted true values: ``true``, ``1``, ``yes``,
+        # ``on`` (case-insensitive).
+        if ephemeral := request.backend_options.get("ephemeral"):
+            if ephemeral.strip().lower() in {"true", "1", "yes", "on"}:
+                config["ephemeral"] = True
+            elif ephemeral.strip().lower() in {"false", "0", "no", "off", ""}:
+                config["ephemeral"] = False
+            else:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"ephemeral: expected boolean, got {ephemeral!r}",
+                )
+        # ``profiles`` backend option: comma-separated list of LXD profile
+        # names to apply. Absent (or empty after parsing) → LXD applies the
+        # ``default`` profile, which is what most single-project setups want.
+        # Explicit ``profiles: ""`` is treated as absence rather than "no
+        # profiles" (an empty list disables the root disk and network).
+        profiles_raw = request.backend_options.get("profiles", "")
+        profiles = [p.strip() for p in profiles_raw.split(",") if p.strip()]
+        if profiles:
+            config["profiles"] = profiles
+        # ``project`` backend option: create the instance inside the named
+        # LXD project (features.* on the project decide isolation scope).
+        # When absent, pylxd's default client stays in whatever project it
+        # discovered — usually ``default``.
+        project = request.backend_options.get("project") or None
+        client = self._client_for(project)
+        timeout = self._effective_create_timeout(request)
         try:
-            instance = self._client.instances.create(config, wait=True)
+            instance = _run_with_timeout(
+                lambda: client.instances.create(config, wait=True),
+                timeout,
+            )
+        except _TimedOut as exc:
+            # Best-effort cleanup: LXD may have created (and even started)
+            # the instance while we timed out waiting. Fire-and-forget —
+            # a failed cleanup just leaks state; the runner is already
+            # aborting the job.
+            self._best_effort_delete(client, name)
+            context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                f"lxd create {image!r} exceeded {exc.timeout}s",
+            )
+            raise AssertionError("unreachable") from exc
         except LXDAPIException as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd create {image!r}: {exc}")
+            context.abort(_lxd_error_to_grpc(exc), f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc
 
         with self._lock:
-            self._envs[name] = _Env(instance_name=instance.name)
+            self._envs[name] = _Env(instance_name=instance.name, project=project)
 
         log.info("created environment %s from image %s", name, image)
 
-        # TODO: discover os/arch and expose a knob for the paths.
+        # TODO: expose a knob for the paths.
         return plugin_pb2.CreateResponse(
             environment_id=name,
             root_path="/root/actions-runner",
             act_path="/root/actions-runner/act",
             tool_cache_path="/opt/hostedtoolcache",
             temp_path="/tmp",
-            os="linux",
-            arch="amd64",
+            os=_lxd_os_to_gha(instance.expanded_config.get("image.os", "")),
+            arch=_lxd_arch_to_gha(instance.architecture),
         )
 
     def Start(  # noqa: N802
@@ -158,11 +458,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             if instance.status_code != _LXD_STATUS_RUNNING:
                 instance.start(wait=True)
         except LXDAPIException as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd start: {exc}")
+            context.abort(_lxd_error_to_grpc(exc), f"lxd start: {exc}")
 
         log.info("started environment %s", request.environment_id)
-        # No image_env discovery yet.
-        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
+        image_env = _image_env_from_instance(instance)
+        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete(image_env=image_env))
 
     def Exec(  # noqa: N802
         self,
@@ -257,7 +557,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 instance.execute(["mkdir", "-p", dest_path])
                 instance.files.recursive_put(tmp, dest_path)
             except LXDAPIException as exc:
-                context.abort(grpc.StatusCode.INTERNAL, f"CopyIn: {exc}")
+                context.abort(_lxd_error_to_grpc(exc), f"CopyIn: {exc}")
 
         return plugin_pb2.CopyInResponse()
 
@@ -273,7 +573,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             try:
                 instance.files.recursive_get(src, tmp)
             except LXDAPIException as exc:
-                context.abort(grpc.StatusCode.INTERNAL, f"CopyOut: {exc}")
+                context.abort(_lxd_error_to_grpc(exc), f"CopyOut: {exc}")
 
             buf = io.BytesIO()
             with tarfile.open(fileobj=buf, mode="w") as tar:
@@ -301,7 +601,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             return plugin_pb2.RemoveResponse()
 
         try:
-            instance = self._client.instances.get(env.instance_name)
+            instance = self._client_for(env.project).instances.get(env.instance_name)
         except NotFound:
             return plugin_pb2.RemoveResponse()
 
@@ -310,7 +610,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 instance.stop(force=True, wait=True)
             instance.delete(wait=True)
         except LXDAPIException as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd remove: {exc}")
+            context.abort(_lxd_error_to_grpc(exc), f"lxd remove: {exc}")
 
         log.info("removed environment %s", env_id)
         return plugin_pb2.RemoveResponse()
