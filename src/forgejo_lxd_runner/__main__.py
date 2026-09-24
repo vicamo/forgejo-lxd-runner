@@ -10,6 +10,7 @@ from concurrent import futures
 import grpc
 from grpc_health.v1 import health_pb2_grpc
 
+from . import __version__
 from .health import HealthService
 from .server import BackendPluginService
 
@@ -37,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
 def serve(address: str, workers: int) -> None:
     from .proto.plugin.v1alpha import plugin_pb2_grpc
 
+    log.info("forgejo-lxd-runner %s starting", __version__)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
 
     backend_service = BackendPluginService()
