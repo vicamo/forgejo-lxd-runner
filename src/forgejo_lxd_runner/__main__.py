@@ -33,7 +33,13 @@ def build_parser() -> argparse.ArgumentParser:
             "the standard grpc.health.v1 status. 0 disables the poller."
         ),
     )
-    p.add_argument("--log-level", default="INFO")
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        type=str.upper,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Root logger level (case-insensitive). Default: INFO.",
+    )
     return p
 
 
@@ -69,7 +75,7 @@ def serve(address: str, workers: int, health_check_interval: float = 10.0) -> No
 def main() -> None:
     args = build_parser().parse_args()
     logging.basicConfig(
-        level=args.log_level.upper(),
+        level=args.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     serve(args.address, args.workers, args.health_check_interval)
