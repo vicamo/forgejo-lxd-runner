@@ -150,9 +150,49 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
 
     def Exec(  # noqa: N802
-        self, request: plugin_pb2.ExecRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.ExecRequest,
+        context: grpc.ServicerContext,
     ) -> Iterator[plugin_pb2.ExecOutput]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Exec not implemented")
+        env = self._lookup(context, request.environment_id)
+
+        environ = dict(request.env) if request.env else None
+        cwd = request.workdir or None
+        # ``request.user`` is proto3 ``optional string``. Only numeric
+        # UIDs for now; name lookup is a later commit.
+        uid: int | None = None
+        if request.HasField("user") and request.user:
+            try:
+                uid = int(request.user)
+            except ValueError:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"user must be a numeric UID for now, got {request.user!r}",
+                )
+
+        try:
+            for kind, payload in self._client.exec_stream(
+                env.instance_name,
+                list(request.command),
+                environment=environ,
+                user=uid,
+                cwd=cwd,
+            ):
+                if kind == "exit":
+                    yield plugin_pb2.ExecOutput(
+                        exec_complete=plugin_pb2.ExecComplete(exit_code=int(payload)),
+                    )
+                    return
+                stream = (
+                    plugin_pb2.DataChunk.STDOUT if kind == "stdout" else plugin_pb2.DataChunk.STDERR
+                )
+                yield plugin_pb2.ExecOutput(
+                    data=plugin_pb2.DataChunk(stream=stream, data=payload),
+                )
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            yield plugin_pb2.ExecOutput(
+                exec_failed=plugin_pb2.ExecFailed(error_message=str(exc)),
+            )
 
     def CopyIn(  # noqa: N802
         self, request_iterator: Iterator[plugin_pb2.CopyInChunk], context: grpc.ServicerContext

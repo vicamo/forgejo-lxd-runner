@@ -18,11 +18,17 @@ it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import queue
+import threading
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
+import websockets
+from websockets.sync.client import connect as ws_connect
 
 log = logging.getLogger(__name__)
 
@@ -324,6 +330,136 @@ class BackendClient:
             timeout=timeout,
             json=payload,
         )
+
+    # ------------------------------------------------------------------
+    # Exec streaming
+
+    def exec_stream(
+        self,
+        name: str,
+        command: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        user: int | None = None,
+        cwd: str | None = None,
+        project: str | None = None,
+    ) -> Iterator[tuple[str, Any]]:
+        """Run ``command`` inside instance ``name`` and stream its output.
+
+        Yields ``("stdout", bytes)`` / ``("stderr", bytes)`` tuples as
+        the daemon flushes frames from the exec websockets, then a final
+        ``("exit", int)`` with the process exit status. On daemon-side
+        failure raises ``BackendOperationError``; HTTP transport failures
+        surface as ``httpx.HTTPError`` from the initial POST.
+
+        Under the hood this drives four websockets — the three fd sockets
+        (stdin/stdout/stderr) plus a control channel — that LXD/Incus
+        creates for every ``wait-for-websocket`` exec. We don't feed
+        stdin (the plugin protocol has no stdin channel), so fd 0 is
+        opened and immediately closed to signal EOF; fds 1 and 2 are
+        drained concurrently in threads into a shared queue so the
+        generator can yield frames in arrival order.
+        """
+
+        payload: dict[str, Any] = {
+            "command": command,
+            "wait-for-websocket": True,
+            "interactive": False,
+        }
+        if environment:
+            payload["environment"] = environment
+        if user is not None:
+            payload["user"] = user
+        if cwd:
+            payload["cwd"] = cwd
+
+        op = self.call("POST", f"/1.0/instances/{name}/exec", project=project, json=payload)
+        op_id = op["id"]
+        fds = (op.get("metadata") or {}).get("fds") or {}
+        # LXD exposes fd secrets keyed by fd number as strings: "0","1","2","control".
+        try:
+            secret_stdin = fds["0"]
+            secret_stdout = fds["1"]
+            secret_stderr = fds["2"]
+            secret_control = fds["control"]
+        except KeyError as exc:
+            raise BackendOperationError(f"exec operation missing fd secret {exc}") from exc
+
+        def _ws(fd_secret: str) -> Any:
+            # Pre-connect a Unix socket ourselves and hand it to the
+            # ``websockets`` handshake — the ``sock=`` kwarg lets us keep
+            # ws:// URIs while talking over AF_UNIX. Always used as a
+            # context manager by the callers below; ``websockets`` 15+
+            # deprecates the "just call ``close()``" pattern.
+            import socket as _socket
+
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.connect(self.socket_path)
+            uri = f"ws://localhost/1.0/operations/{op_id}/websocket?secret={fd_secret}"
+            return ws_connect(uri, sock=sock, open_timeout=None, close_timeout=None)
+
+        out_q: queue.Queue[tuple[str, bytes] | None] = queue.Queue()
+
+        def _drain(fd_secret: str, kind: str) -> None:
+            try:
+                ws_cm = _ws(fd_secret)
+            except Exception as exc:  # pragma: no cover — defensive
+                out_q.put(("_error", str(exc).encode()))
+                out_q.put(None)
+                return
+            try:
+                with ws_cm as ws:
+                    try:
+                        for frame in ws:
+                            if not frame:
+                                # LXD signals EOF on an fd with an empty binary frame.
+                                break
+                            data = frame.encode() if isinstance(frame, str) else frame
+                            out_q.put((kind, data))
+                    except websockets.ConnectionClosed:
+                        pass
+            finally:
+                out_q.put(None)
+
+        # Hold control + stdin open across the whole drain. The daemon
+        # waits for all four fd sockets to connect before starting the
+        # process, so we can't connect+close stdin early — that races
+        # the drain threads' connects and the daemon returns HTTP 500
+        # on the losers. ExitStack keeps them alive across the ``yield``
+        # loop below without a nested ``with`` that would swallow it.
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_ws(secret_control))
+            stack.enter_context(_ws(secret_stdin))
+
+            t_out = threading.Thread(target=_drain, args=(secret_stdout, "stdout"), daemon=True)
+            t_err = threading.Thread(target=_drain, args=(secret_stderr, "stderr"), daemon=True)
+            t_out.start()
+            t_err.start()
+
+            remaining = 2
+            try:
+                while remaining:
+                    item = out_q.get()
+                    if item is None:
+                        remaining -= 1
+                        continue
+                    kind, data = item
+                    if kind == "_error":
+                        raise BackendOperationError(data.decode(errors="replace"))
+                    yield kind, data
+            finally:
+                t_out.join(timeout=5)
+                t_err.join(timeout=5)
+
+        # Now the operation record carries the final return code.
+        meta = self.call("GET", f"/1.0/operations/{op_id}", project=project)
+        return_code = (meta.get("metadata") or {}).get("return")
+        if return_code is None:
+            # Fall back to waiting on the operation if we somehow raced
+            # the recorded return; wait is idempotent post-completion.
+            waited = self.operation_wait({"id": op_id}, project=project)
+            return_code = waited.get("metadata", {}).get("return")
+        yield "exit", int(return_code or 0)
 
 
 def _autodetect_socket() -> str:

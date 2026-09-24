@@ -9,7 +9,9 @@ assert autodetect landed on the intended daemon.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import time
 import uuid
 from collections.abc import Iterator
 
@@ -378,4 +380,57 @@ def test_set_instance_state_completes_start_and_stop(
         assert stopped.get("status") == "Stopped"
         assert stopped.get("status_code") == 102
     finally:
+        _delete_instance(client, name)
+
+
+# ---------------------------------------------------------------------------
+# exec_stream — needs a running instance, so we reuse the tiny-image helper.
+
+
+def test_exec_stream_captures_output_and_exit_codes(client: BackendClient) -> None:
+    """exec_stream yields stdout/stderr frames and a final ("exit", int).
+
+    Runs three commands against a single freshly-booted instance (one
+    launch amortises the image pull across all three checks):
+
+    1. ``echo`` a marker on stdout → frames concatenated must contain
+       the marker, exit code must be 0.
+    2. ``echo`` a marker on stderr → same, but on the stderr channel.
+    3. ``exit 42`` → propagates the non-zero exit code.
+
+    The daemon is free to chunk small payloads however it likes, so we
+    reassemble frames by kind rather than pinning the frame count.
+    """
+    source = _tiny_image_source(client)
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    try:
+        client.launch_instance({"name": name, "source": source}, timeout=180.0)
+        client.set_instance_state(name, "start", timeout=60.0)
+
+        # Give init a moment to spawn a working shell. A fixed wait is
+        # crude but honest — the earlier "poll exec until it works"
+        # trick masked real generator errors from the retry loop.
+        time.sleep(5)
+
+        # 1. stdout + exit 0
+        frames = list(client.exec_stream(name, ["/bin/sh", "-c", "echo forgejo-e2e-out"]))
+        stdout = b"".join(p for k, p in frames if k == "stdout")
+        exits = [p for k, p in frames if k == "exit"]
+        assert b"forgejo-e2e-out" in stdout
+        assert exits == [0]
+
+        # 2. stderr + exit 0
+        frames = list(client.exec_stream(name, ["/bin/sh", "-c", "echo forgejo-e2e-err 1>&2"]))
+        stderr = b"".join(p for k, p in frames if k == "stderr")
+        exits = [p for k, p in frames if k == "exit"]
+        assert b"forgejo-e2e-err" in stderr
+        assert exits == [0]
+
+        # 3. non-zero exit propagates.
+        frames = list(client.exec_stream(name, ["/bin/sh", "-c", "exit 42"]))
+        exits = [p for k, p in frames if k == "exit"]
+        assert exits == [42]
+    finally:
+        with contextlib.suppress(BackendOperationError, httpx.HTTPError):
+            client.set_instance_state(name, "stop", force=True, timeout=30.0)
         _delete_instance(client, name)
