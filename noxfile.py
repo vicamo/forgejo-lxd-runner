@@ -11,6 +11,7 @@ Individual sessions:
     nox -s type            # mypy
     nox -s tests           # pytest on the current interpreter
     nox -s tests-3.12      # pytest on a specific interpreter
+    nox -s e2e             # pytest against a live LXD or Incus daemon
 """
 
 from __future__ import annotations
@@ -131,3 +132,14 @@ def type(session: nox.Session) -> None:
 def tests(session: nox.Session) -> None:
     session.install("-e", ".[dev]")
     session.run("pytest", "tests/unit", "tests/test_version.py", *session.posargs)
+
+
+@nox.session
+def e2e(session: nox.Session) -> None:
+    """Run e2e tests against a live LXD or Incus daemon on this host.
+
+    The socket path is intentionally NOT passed in — the client's
+    autodetect logic is part of what we're exercising.
+    """
+    session.install("-e", ".[dev]")
+    session.run("pytest", "tests/e2e", *session.posargs)
