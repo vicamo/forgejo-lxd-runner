@@ -25,6 +25,7 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import grpc
@@ -37,6 +38,8 @@ log = logging.getLogger(__name__)
 
 # LXD instance status codes we care about.
 _LXD_STATUS_RUNNING = 103
+
+_COPY_CHUNK_SIZE = 256 * 1024
 
 
 class _Env:
@@ -258,9 +261,30 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         return plugin_pb2.CopyInResponse()
 
     def CopyOut(  # noqa: N802
-        self, request: plugin_pb2.CopyOutRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.CopyOutRequest,
+        context: grpc.ServicerContext,
     ) -> Iterator[plugin_pb2.CopyOutChunk]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "CopyOut not implemented")
+        instance = self._instance(context, request.environment_id)
+        src = request.src_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                instance.files.recursive_get(src, tmp)
+            except LXDAPIException as exc:
+                context.abort(grpc.StatusCode.INTERNAL, f"CopyOut: {exc}")
+
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w") as tar:
+                for child in Path(tmp).iterdir():
+                    tar.add(child, arcname=child.name)
+            buf.seek(0)
+
+        while True:
+            data = buf.read(_COPY_CHUNK_SIZE)
+            if not data:
+                break
+            yield plugin_pb2.CopyOutChunk(data=data)
 
     def Remove(  # noqa: N802
         self, request: plugin_pb2.RemoveRequest, context: grpc.ServicerContext

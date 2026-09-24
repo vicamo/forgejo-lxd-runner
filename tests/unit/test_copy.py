@@ -88,3 +88,27 @@ def test_copy_in_rejects_envelope_on_later_chunk(
     with pytest.raises(aborted) as exc:
         service.CopyIn(iter(chunks), context)
     assert exc.value.code == grpc.StatusCode.INVALID_ARGUMENT  # type: ignore[attr-defined]
+
+
+def test_copy_out_streams_tar_of_src_path(
+    service: BackendPluginService,
+    context: MagicMock,
+    with_env: MagicMock,
+    tmp_path: Path,  # noqa: ARG001
+) -> None:
+    def _recursive_get(src: str, dest: str) -> None:  # noqa: ARG001
+        (Path(dest) / "out.txt").write_bytes(b"bye")
+
+    with_env.files.recursive_get.side_effect = _recursive_get
+
+    req = plugin_pb2.CopyOutRequest(environment_id="job-1", src_path="/some/dir")
+    chunks = list(service.CopyOut(req, context))
+    with_env.files.recursive_get.assert_called_once()
+
+    tar_bytes = b"".join(c.data for c in chunks)
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
+        names = tar.getnames()
+        member = tar.extractfile("out.txt")
+        assert member is not None
+        assert member.read() == b"bye"
+    assert "out.txt" in names
