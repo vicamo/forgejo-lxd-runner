@@ -55,15 +55,22 @@ class _Env:
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     """LXD-backed implementation of ``plugin.v1alpha.BackendPlugin``."""
 
-    name = "lxd"
-    """Wire-protocol backend name returned by ``Capabilities``.
+    DEFAULT_NAME = "lxd"
+    """Default wire-protocol backend name returned by ``Capabilities``.
 
     Must match the plugin's scheme in the runner's ``plugins:`` config —
     labels like ``mylabel:lxd://<image>`` are routed to this backend.
-    Subclasses may override to reuse this service under a different scheme.
+    Override via the ``--name`` CLI flag when running multiple plugin
+    processes so each is addressable under a distinct scheme.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = DEFAULT_NAME) -> None:
+        # The name is what Forgejo runner labels reference via the
+        # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
+        # an operator run several plugin processes side by side — each
+        # with its own connection settings — and address them
+        # independently from a single runner config.
+        self.name = name
         # No endpoint / cert args yet: pylxd auto-detects the local socket
         # and lands in the ``default`` project.
         self._client = pylxd.Client()

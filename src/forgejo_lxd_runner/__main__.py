@@ -20,6 +20,16 @@ log = logging.getLogger("forgejo_lxd_runner")
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="forgejo-lxd-runner")
     p.add_argument(
+        "--name",
+        default=BackendPluginService.DEFAULT_NAME,
+        help=(
+            "Backend name returned by Capabilities and referenced by the "
+            "runner's label scheme (<label>:<name>://<arg>). Change it when "
+            "running multiple plugin processes with different connection "
+            "settings so each is addressable independently. Default: %(default)s."
+        ),
+    )
+    p.add_argument(
         "--address",
         default="unix:///run/forgejo-lxd-runner.sock",
         help="gRPC bind address (e.g. unix:///path/to.sock or 127.0.0.1:50051).",
@@ -44,13 +54,18 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def serve(address: str, workers: int, health_check_interval: float = 10.0) -> None:
+def serve(
+    address: str,
+    workers: int,
+    name: str = BackendPluginService.DEFAULT_NAME,
+    health_check_interval: float = 10.0,
+) -> None:
     from .proto.plugin.v1alpha import plugin_pb2_grpc
 
     log.info("forgejo-lxd-runner %s starting", __version__)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
 
-    backend_service = BackendPluginService()
+    backend_service = BackendPluginService(name=name)
     plugin_pb2_grpc.add_BackendPluginServicer_to_server(backend_service, server)  # type: ignore[no-untyped-call]
 
     health_service = HealthService(backend_service, interval=health_check_interval)
@@ -58,7 +73,7 @@ def serve(address: str, workers: int, health_check_interval: float = 10.0) -> No
 
     server.add_insecure_port(address)
     server.start()
-    log.info("forgejo-lxd-runner listening on %s", address)
+    log.info("forgejo-lxd-runner %r listening on %s", name, address)
 
     health_service.start()
 
@@ -80,7 +95,7 @@ def main() -> None:
         level=args.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    serve(args.address, args.workers, args.health_check_interval)
+    serve(args.address, args.workers, args.name, args.health_check_interval)
 
 
 if __name__ == "__main__":
