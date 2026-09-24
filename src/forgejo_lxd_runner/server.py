@@ -37,6 +37,7 @@ from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 log = logging.getLogger(__name__)
 
 # LXD instance status codes we care about.
+_LXD_STATUS_STOPPED = 102
 _LXD_STATUS_RUNNING = 103
 
 _COPY_CHUNK_SIZE = 256 * 1024
@@ -287,6 +288,29 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             yield plugin_pb2.CopyOutChunk(data=data)
 
     def Remove(  # noqa: N802
-        self, request: plugin_pb2.RemoveRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.RemoveRequest,
+        context: grpc.ServicerContext,
     ) -> plugin_pb2.RemoveResponse:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Remove not implemented")
+        env_id = request.environment_id
+        with self._lock:
+            env = self._envs.pop(env_id, None)
+        # Idempotent: Remove after a failed Create, or a duplicate teardown,
+        # should not raise.
+        if env is None:
+            return plugin_pb2.RemoveResponse()
+
+        try:
+            instance = self._client.instances.get(env.instance_name)
+        except NotFound:
+            return plugin_pb2.RemoveResponse()
+
+        try:
+            if instance.status_code != _LXD_STATUS_STOPPED:
+                instance.stop(force=True, wait=True)
+            instance.delete(wait=True)
+        except LXDAPIException as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"lxd remove: {exc}")
+
+        log.info("removed environment %s", env_id)
+        return plugin_pb2.RemoveResponse()
