@@ -40,6 +40,26 @@ log = logging.getLogger(__name__)
 _LXD_STATUS_STOPPED = 102
 _LXD_STATUS_RUNNING = 103
 
+_IMAGE_ENV_PREFIX = "environment."
+
+
+def _image_env_from_instance(instance: Any) -> dict[str, str]:
+    """Extract image-baked env vars from an LXD instance.
+
+    LXD surfaces environment variables baked into the image (via the image's
+    own metadata, plus any layered profiles) as ``environment.<NAME>`` keys
+    on the instance's ``expanded_config``. We strip the prefix and hand
+    the resulting map to the runner as ``StartComplete.image_env`` so job
+    env vars can be layered on top of them.
+    """
+    config = getattr(instance, "expanded_config", None) or {}
+    return {
+        key[len(_IMAGE_ENV_PREFIX) :]: str(value)
+        for key, value in config.items()
+        if key.startswith(_IMAGE_ENV_PREFIX) and key != _IMAGE_ENV_PREFIX
+    }
+
+
 _COPY_CHUNK_SIZE = 256 * 1024
 
 
@@ -168,8 +188,8 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(grpc.StatusCode.INTERNAL, f"lxd start: {exc}")
 
         log.info("started environment %s", request.environment_id)
-        # No image_env discovery yet.
-        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
+        image_env = _image_env_from_instance(instance)
+        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete(image_env=image_env))
 
     def Exec(  # noqa: N802
         self,

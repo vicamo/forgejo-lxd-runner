@@ -34,10 +34,6 @@ same scope. The later sections are pure planning — nothing yet.
       (`true/1/yes/on` and `false/0/no/off`, case + whitespace
       insensitive) into `config["ephemeral"]`. Absent → LXD default.
       Invalid → `INVALID_ARGUMENT`.
-- [ ] `image_env`: forward workflow-author-supplied environment
-      variables into the LXD instance config (`environment.<KEY>` or
-      the `config` map). Complements the existing image alias handling
-      from `label_arg`.
 
 ## Runtime / correctness
 
