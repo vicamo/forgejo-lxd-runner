@@ -10,6 +10,8 @@ Known simplifications, all called out in code:
 * ``Exec`` buffers the full command output before yielding. A later
   commit will switch to the streaming websocket exec so long-running
   commands report progress in real time.
+* ``CopyIn`` / ``CopyOut`` buffer the whole tar archive in memory. Fine
+  for typical workflow payloads; a streaming rewrite is a later commit.
 * ``CreateResponse`` reports a hardcoded filesystem layout and
   ``os=linux`` / ``arch=amd64``. Discovery from the running instance is
   a later commit.
@@ -17,7 +19,10 @@ Known simplifications, all called out in code:
 
 from __future__ import annotations
 
+import io
 import logging
+import tarfile
+import tempfile
 import threading
 from collections.abc import Iterator
 from typing import Any
@@ -207,9 +212,50 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         )
 
     def CopyIn(  # noqa: N802
-        self, request_iterator: Iterator[plugin_pb2.CopyInChunk], context: grpc.ServicerContext
+        self,
+        request_iterator: Iterator[plugin_pb2.CopyInChunk],
+        context: grpc.ServicerContext,
     ) -> plugin_pb2.CopyInResponse:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "CopyIn not implemented")
+        first = next(request_iterator, None)
+        if first is None:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "CopyIn: empty stream")
+            raise AssertionError("unreachable")
+        if not first.HasField("environment_id") or not first.HasField("dest_path"):
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "CopyIn: first chunk must set environment_id and dest_path",
+            )
+
+        instance = self._instance(context, first.environment_id)
+        dest_path = first.dest_path
+
+        buf = io.BytesIO()
+        if first.data:
+            buf.write(first.data)
+        for chunk in request_iterator:
+            if chunk.HasField("environment_id") or chunk.HasField("dest_path"):
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    "CopyIn: environment_id/dest_path only on first chunk",
+                )
+            buf.write(chunk.data)
+        buf.seek(0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                with tarfile.open(fileobj=buf, mode="r|*") as tar:
+                    tar.extractall(tmp)  # noqa: S202 — trusted runner input
+            except tarfile.TarError as exc:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"CopyIn: bad tar: {exc}")
+
+            try:
+                # Ensure the destination directory exists before pushing.
+                instance.execute(["mkdir", "-p", dest_path])
+                instance.files.recursive_put(tmp, dest_path)
+            except LXDAPIException as exc:
+                context.abort(grpc.StatusCode.INTERNAL, f"CopyIn: {exc}")
+
+        return plugin_pb2.CopyInResponse()
 
     def CopyOut(  # noqa: N802
         self, request: plugin_pb2.CopyOutRequest, context: grpc.ServicerContext
