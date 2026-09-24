@@ -17,14 +17,18 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Iterator
+from typing import Any
 
 import grpc
 import pylxd
-from pylxd.exceptions import LXDAPIException
+from pylxd.exceptions import LXDAPIException, NotFound
 
 from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 
 log = logging.getLogger(__name__)
+
+# LXD instance status codes we care about.
+_LXD_STATUS_RUNNING = 103
 
 
 class _Env:
@@ -53,6 +57,29 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         self._client = pylxd.Client()
         self._envs: dict[str, _Env] = {}
         self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _lookup(self, context: grpc.ServicerContext, env_id: str) -> _Env:
+        with self._lock:
+            env = self._envs.get(env_id)
+        if env is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, f"unknown environment {env_id!r}")
+            raise AssertionError("unreachable")  # for type checkers
+        return env
+
+    def _instance(self, context: grpc.ServicerContext, env_id: str) -> Any:
+        env = self._lookup(context, env_id)
+        try:
+            return self._client.instances.get(env.instance_name)
+        except NotFound as exc:
+            context.abort(
+                grpc.StatusCode.NOT_FOUND,
+                f"lxd instance {env.instance_name!r} is gone",
+            )
+            raise AssertionError("unreachable") from exc
 
     # ------------------------------------------------------------------
     # BackendPlugin RPCs
@@ -110,9 +137,20 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         )
 
     def Start(  # noqa: N802
-        self, request: plugin_pb2.StartRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.StartRequest,
+        context: grpc.ServicerContext,
     ) -> Iterator[plugin_pb2.StartOutput]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Start not implemented")
+        instance = self._instance(context, request.environment_id)
+        try:
+            if instance.status_code != _LXD_STATUS_RUNNING:
+                instance.start(wait=True)
+        except LXDAPIException as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"lxd start: {exc}")
+
+        log.info("started environment %s", request.environment_id)
+        # No image_env discovery yet.
+        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
 
     def Exec(  # noqa: N802
         self, request: plugin_pb2.ExecRequest, context: grpc.ServicerContext
