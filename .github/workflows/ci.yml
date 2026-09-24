@@ -72,3 +72,65 @@ jobs:
 
       - name: unit tests
         run: nox -s tests
+
+  e2e:
+    name: e2e / ${{ matrix.backend }}
+    needs: discover
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [lxd, incus]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: set up LXD
+        if: matrix.backend == 'lxd'
+        uses: canonical/setup-lxd@v0.1.3
+        with:
+          channel: 5.21/stable
+
+      - name: relax LXD socket permissions
+        if: matrix.backend == 'lxd'
+        # setup-lxd adds the runner user to the `lxd` group, but the
+        # supplementary group only takes effect on next login — the
+        # pytest process in this same job would still hit EACCES on
+        # the socket. World-writable is safe here (ephemeral runner).
+        run: |
+          for sock in \
+            /var/snap/lxd/common/lxd/unix.socket \
+            /var/lib/lxd/unix.socket; do
+            if [ -S "$sock" ]; then sudo chmod 0666 "$sock"; fi
+          done
+
+      - name: set up Incus
+        if: matrix.backend == 'incus'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y incus
+          sudo incus admin init --auto
+          # Client autodetects the socket by walking a fixed list; make
+          # the Incus socket world-accessible so the tests can reach it
+          # without sudo. Group membership would need a re-login to take
+          # effect within the same job.
+          sudo chmod 0666 /var/lib/incus/unix.socket
+
+      - uses: actions/setup-python@v7
+        with:
+          # e2e only needs one interpreter; pick the newest we support.
+          python-version: ${{ fromJSON(needs.discover.outputs.versions)[0] }}
+
+      - name: install nox
+        run: pip install nox
+
+      - name: generate protobuf stubs
+        run: nox -s proto
+
+      - name: e2e against a live ${{ matrix.backend }} daemon
+        run: nox -s e2e
+        env:
+          # Tell the tests which daemon *should* have been autodetected,
+          # so they can verify the autodetect list is ordered correctly.
+          # The socket path itself is intentionally left unset — the
+          # client must find it on its own.
+          FORGEJO_LXD_RUNNER_E2E_BACKEND: ${{ matrix.backend }}
