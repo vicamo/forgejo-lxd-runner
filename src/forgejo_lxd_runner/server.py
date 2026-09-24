@@ -17,7 +17,22 @@ from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     """LXD-backed implementation of ``plugin.v1alpha.BackendPlugin``."""
 
-    name = "lxd"
+    DEFAULT_NAME = "lxd"
+    """Default wire-protocol backend name returned by ``Capabilities``.
+
+    Must match the plugin's scheme in the runner's ``plugins:`` config —
+    labels like ``mylabel:lxd://<image>`` are routed to this backend.
+    Override via the ``--name`` CLI flag when running multiple plugin
+    processes so each is addressable under a distinct scheme.
+    """
+
+    def __init__(self, name: str = DEFAULT_NAME) -> None:
+        # The name is what Forgejo runner labels reference via the
+        # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
+        # an operator run several plugin processes side by side — each
+        # with its own connection settings — and address them
+        # independently from a single runner config.
+        self.name = name
 
     def Capabilities(  # noqa: N802 — gRPC method name
         self,
