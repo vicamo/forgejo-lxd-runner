@@ -131,3 +131,11 @@ def type(session: nox.Session) -> None:
 def tests(session: nox.Session) -> None:
     session.install("-e", ".[dev]")
     session.run("pytest", "tests/unit", "tests/grpc", "tests/test_version.py", *session.posargs)
+
+
+@nox.session
+def e2e(session: nox.Session) -> None:
+    """Run the LXD end-to-end smoke test. Requires a working local LXD."""
+    session.install("-e", ".[dev]")
+    session.env["FORGEJO_LXD_E2E"] = "1"
+    session.run("pytest", "tests/e2e", *session.posargs)
