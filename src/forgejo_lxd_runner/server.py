@@ -7,6 +7,8 @@ at a time.
 
 Known simplifications, all called out in code:
 
+* ``CopyIn`` / ``CopyOut`` buffer the whole tar archive in memory. Fine
+  for typical workflow payloads; a streaming rewrite is a later commit.
 * ``CreateResponse`` reports a hardcoded filesystem layout and
   ``os=Linux`` / ``arch=X64`` (the GHA ``RUNNER_OS`` / ``RUNNER_ARCH``
   vocabulary). Discovery from the LXD image metadata is a later commit.
@@ -14,7 +16,10 @@ Known simplifications, all called out in code:
 
 from __future__ import annotations
 
+import io
 import logging
+import os
+import tarfile
 import threading
 from collections.abc import Iterator
 
@@ -195,9 +200,69 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             )
 
     def CopyIn(  # noqa: N802
-        self, request_iterator: Iterator[plugin_pb2.CopyInChunk], context: grpc.ServicerContext
+        self,
+        request_iterator: Iterator[plugin_pb2.CopyInChunk],
+        context: grpc.ServicerContext,
     ) -> plugin_pb2.CopyInResponse:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "CopyIn not implemented")
+        first = next(request_iterator, None)
+        if first is None:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "CopyIn: empty stream")
+            raise AssertionError("unreachable")
+        if not first.HasField("environment_id") or not first.HasField("dest_path"):
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "CopyIn: first chunk must set environment_id and dest_path",
+            )
+
+        env = self._lookup(context, first.environment_id)
+        dest_path = first.dest_path
+
+        buf = io.BytesIO()
+        if first.data:
+            buf.write(first.data)
+        for chunk in request_iterator:
+            if chunk.HasField("environment_id") or chunk.HasField("dest_path"):
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    "CopyIn: environment_id/dest_path only on first chunk",
+                )
+            buf.write(chunk.data)
+        buf.seek(0)
+
+        try:
+            with tarfile.open(fileobj=buf, mode="r|*") as tar:
+                self._push_tar(env.instance_name, dest_path, tar)
+        except tarfile.TarError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"CopyIn: bad tar: {exc}")
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"CopyIn: {exc}")
+
+        return plugin_pb2.CopyInResponse()
+
+    def _push_tar(self, instance: str, dest_path: str, tar: tarfile.TarFile) -> None:
+        """Walk ``tar`` and replay each entry onto ``instance:dest_path``.
+
+        Directories become ``X-*-type: directory`` POSTs, files carry
+        their bytes with the recorded mode, symlinks store their target
+        as the body. Hardlinks and other exotic types are ignored — CI
+        payloads (build inputs, source trees) never carry them.
+        """
+
+        # Make sure the destination directory exists first.
+        self._client.push_directory(instance, dest_path)
+
+        for member in tar:
+            # ``member.name`` is a relative path inside the tarball.
+            target = os.path.join(dest_path, member.name).replace(os.sep, "/")
+            if member.isdir():
+                self._client.push_directory(instance, target)
+            elif member.isfile():
+                extracted = tar.extractfile(member)
+                data = extracted.read() if extracted is not None else b""
+                self._client.push_file(instance, target, data, mode=member.mode or 0o644)
+            elif member.issym():
+                self._client.push_symlink(instance, target, member.linkname)
+            # Anything else (block/char/fifo/hardlink) is silently skipped.
 
     def CopyOut(  # noqa: N802
         self, request: plugin_pb2.CopyOutRequest, context: grpc.ServicerContext

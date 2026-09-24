@@ -434,3 +434,65 @@ def test_exec_stream_captures_output_and_exit_codes(client: BackendClient) -> No
         with contextlib.suppress(BackendOperationError, httpx.HTTPError):
             client.set_instance_state(name, "stop", force=True, timeout=30.0)
         _delete_instance(client, name)
+
+
+# ---------------------------------------------------------------------------
+# push_directory / push_file / push_symlink — reuse the tiny-image helper
+# so we can shell into the guest to verify what actually landed.
+
+
+def test_push_helpers_replay_directory_file_and_symlink(
+    client: BackendClient,
+) -> None:
+    """push_directory / push_file / push_symlink land the expected FS entries.
+
+    Uses the same tiny bootable image as the state and exec tests so we
+    can shell in and inspect what actually appeared on disk. Verifies:
+
+    * ``push_directory`` creates the target with directory semantics.
+    * ``push_file`` writes exact bytes and honours the ``mode`` header.
+    * ``push_symlink`` creates a link whose target matches what we sent.
+    """
+    source = _tiny_image_source(client)
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    payload = b"forgejo-e2e-file-payload\n"
+    try:
+        client.launch_instance({"name": name, "source": source}, timeout=180.0)
+        client.set_instance_state(name, "start", timeout=60.0)
+        # Same rationale as the exec test: init needs a beat to spawn a
+        # working shell before we can read files back.
+        time.sleep(5)
+
+        client.push_directory(name, "/root/forgejo-e2e")
+        client.push_file(name, "/root/forgejo-e2e/hello", payload, mode=0o600)
+        client.push_symlink(name, "/root/forgejo-e2e/hello.lnk", "/root/forgejo-e2e/hello")
+
+        def _run(cmd: list[str]) -> tuple[bytes, int]:
+            frames = list(client.exec_stream(name, cmd))
+            stdout = b"".join(p for k, p in frames if k == "stdout")
+            exits = [p for k, p in frames if k == "exit"]
+            assert exits, f"no exit frame from {cmd!r}"
+            return stdout, exits[0]
+
+        # Directory landed.
+        _, rc = _run(["/bin/sh", "-c", "test -d /root/forgejo-e2e"])
+        assert rc == 0
+
+        # File contents match exactly.
+        out, rc = _run(["/bin/cat", "/root/forgejo-e2e/hello"])
+        assert rc == 0
+        assert out == payload
+
+        # File mode honours the header (0600 → "600" in stat's %a format).
+        out, rc = _run(["/bin/sh", "-c", "stat -c %a /root/forgejo-e2e/hello"])
+        assert rc == 0
+        assert out.strip() == b"600"
+
+        # Symlink resolves to the target we asked for.
+        out, rc = _run(["/bin/sh", "-c", "readlink /root/forgejo-e2e/hello.lnk"])
+        assert rc == 0
+        assert out.strip() == b"/root/forgejo-e2e/hello"
+    finally:
+        with contextlib.suppress(BackendOperationError, httpx.HTTPError):
+            client.set_instance_state(name, "stop", force=True, timeout=30.0)
+        _delete_instance(client, name)

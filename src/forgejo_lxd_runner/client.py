@@ -461,6 +461,65 @@ class BackendClient:
             return_code = waited.get("metadata", {}).get("return")
         yield "exit", int(return_code or 0)
 
+    # ------------------------------------------------------------------
+    # File transfer
+
+    def _file_headers(self, file_type: str, mode: int | None = None) -> dict[str, str]:
+        """Build the ``X-*-{type,mode}`` headers under the daemon's prefix.
+
+        LXD uses ``X-LXD-*`` and Incus uses ``X-Incus-*``; the daemon
+        matches its own prefix only. The flavour comes from
+        ``self.flavor`` (cached via ``server_info()``).
+        """
+
+        prefix = "X-Incus" if self.flavor == "incus" else "X-LXD"
+        headers = {f"{prefix}-type": file_type}
+        if mode is not None and file_type == "file":
+            headers[f"{prefix}-mode"] = f"{mode:04o}"
+        return headers
+
+    def push_directory(self, instance: str, path: str, *, project: str | None = None) -> None:
+        """Create ``path`` inside ``instance`` as a directory (mkdir -p semantics)."""
+        self.call(
+            "POST",
+            f"/1.0/instances/{instance}/files",
+            project=project,
+            params={"path": path},
+            headers=self._file_headers("directory"),
+        )
+
+    def push_file(
+        self,
+        instance: str,
+        path: str,
+        data: bytes,
+        *,
+        mode: int = 0o644,
+        project: str | None = None,
+    ) -> None:
+        """Upload ``data`` to ``path`` inside ``instance``."""
+        self.call(
+            "POST",
+            f"/1.0/instances/{instance}/files",
+            project=project,
+            params={"path": path},
+            headers=self._file_headers("file", mode=mode),
+            content=data,
+        )
+
+    def push_symlink(
+        self, instance: str, path: str, target: str, *, project: str | None = None
+    ) -> None:
+        """Create ``path`` inside ``instance`` as a symlink to ``target``."""
+        self.call(
+            "POST",
+            f"/1.0/instances/{instance}/files",
+            project=project,
+            params={"path": path},
+            headers=self._file_headers("symlink"),
+            content=target.encode(),
+        )
+
 
 def _autodetect_socket() -> str:
     """Return the first existing socket from ``_DEFAULT_SOCKETS``.
