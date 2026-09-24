@@ -81,3 +81,31 @@ def test_copy_in_rejects_envelope_on_later_chunk(
     with pytest.raises(aborted) as exc:
         service.CopyIn(iter(chunks), context)
     assert exc.value.code == grpc.StatusCode.INVALID_ARGUMENT  # type: ignore[attr-defined]
+
+
+def test_copy_out_streams_tar_of_src_path(
+    service: BackendPluginService,
+    context: MagicMock,
+    with_env: MagicMock,
+) -> None:
+    # Simulate ``/some/dir`` containing one file: ``out.txt`` with body b"bye".
+    def _pull(instance: str, path: str) -> tuple[str, bytes, int]:
+        assert instance == "job-1"
+        if path == "/some/dir":
+            return "directory", b'["out.txt"]', 0o755
+        if path == "/some/dir/out.txt":
+            return "file", b"bye", 0o644
+        raise AssertionError(f"unexpected pull_file path: {path}")
+
+    with_env.pull_file.side_effect = _pull
+
+    req = plugin_pb2.CopyOutRequest(environment_id="job-1", src_path="/some/dir")
+    chunks = list(service.CopyOut(req, context))
+
+    tar_bytes = b"".join(c.data for c in chunks)
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
+        names = tar.getnames()
+        member = tar.extractfile("dir/out.txt")
+        assert member is not None
+        assert member.read() == b"bye"
+    assert "dir/out.txt" in names

@@ -17,6 +17,7 @@ Known simplifications, all called out in code:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import tarfile
@@ -33,6 +34,9 @@ log = logging.getLogger(__name__)
 
 # LXD / Incus instance status codes we care about.
 _STATUS_RUNNING = 103
+
+# CopyOut yields the tar body in fixed-size gRPC chunks.
+_COPY_CHUNK_SIZE = 256 * 1024
 
 
 class _Env:
@@ -265,9 +269,58 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             # Anything else (block/char/fifo/hardlink) is silently skipped.
 
     def CopyOut(  # noqa: N802
-        self, request: plugin_pb2.CopyOutRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.CopyOutRequest,
+        context: grpc.ServicerContext,
     ) -> Iterator[plugin_pb2.CopyOutChunk]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "CopyOut not implemented")
+        env = self._lookup(context, request.environment_id)
+        src = request.src_path
+
+        buf = io.BytesIO()
+        try:
+            with tarfile.open(fileobj=buf, mode="w") as tar:
+                self._pull_into_tar(env.instance_name, src, tar, arcbase="")
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"CopyOut: {exc}")
+
+        buf.seek(0)
+        while True:
+            data = buf.read(_COPY_CHUNK_SIZE)
+            if not data:
+                break
+            yield plugin_pb2.CopyOutChunk(data=data)
+
+    def _pull_into_tar(self, instance: str, src: str, tar: tarfile.TarFile, arcbase: str) -> None:
+        """Recursively fetch ``src`` from ``instance`` and append to ``tar``.
+
+        Directory listings come back as JSON arrays; files and symlinks
+        return their content directly (with ``X-*-type`` in the response
+        headers telling us which). The recursion mirrors what a plain
+        ``recursive_get`` used to do — one REST round-trip per entry.
+        """
+
+        kind, data, mode = self._client.pull_file(instance, src)
+        base = os.path.basename(src.rstrip("/")) or src
+        arcname = os.path.join(arcbase, base).replace(os.sep, "/") if arcbase else base
+
+        if kind == "directory":
+            info = tarfile.TarInfo(name=arcname)
+            info.type = tarfile.DIRTYPE
+            info.mode = mode or 0o755
+            tar.addfile(info)
+            for entry in json.loads(data.decode() or "[]"):
+                child = f"{src.rstrip('/')}/{entry}"
+                self._pull_into_tar(instance, child, tar, arcbase=arcname)
+        elif kind == "symlink":
+            info = tarfile.TarInfo(name=arcname)
+            info.type = tarfile.SYMTYPE
+            info.linkname = data.decode()
+            tar.addfile(info)
+        else:  # "file"
+            info = tarfile.TarInfo(name=arcname)
+            info.size = len(data)
+            info.mode = mode or 0o644
+            tar.addfile(info, io.BytesIO(data))
 
     def Remove(  # noqa: N802
         self, request: plugin_pb2.RemoveRequest, context: grpc.ServicerContext

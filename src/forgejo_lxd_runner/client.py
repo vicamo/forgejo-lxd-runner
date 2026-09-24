@@ -520,6 +520,43 @@ class BackendClient:
             content=target.encode(),
         )
 
+    def pull_file(
+        self, instance: str, path: str, *, project: str | None = None
+    ) -> tuple[str, bytes, int]:
+        """Fetch ``path`` from ``instance``.
+
+        Returns ``(kind, data, mode)`` where ``kind`` is ``"file"``,
+        ``"directory"``, or ``"symlink"``. For a directory, ``data`` is
+        the JSON body listing the entries (utf-8, ready to
+        ``json.loads``); for a file, the raw bytes; for a symlink, the
+        target path bytes. ``mode`` is a numeric mode (0 when the daemon
+        did not report one, e.g. directories on some versions).
+
+        Bypasses :meth:`call` on purpose: file bytes and symlink targets
+        aren't JSON, so the ``metadata`` unwrap ``call()`` performs would
+        either fail or throw away the payload. We consume the raw
+        response body and read ``kind`` / ``mode`` from headers instead.
+        """
+
+        resp = self.request(
+            "GET",
+            f"/1.0/instances/{instance}/files",
+            project=project,
+            params={"path": path},
+        )
+        resp.raise_for_status()
+        # Look up either prefix — the daemon replies with its own.
+        headers = resp.headers
+        kind = headers.get("X-Incus-type") or headers.get("X-LXD-type")
+        if kind is None:
+            raise BackendOperationError(f"daemon did not report X-*-type on GET files for {path!r}")
+        mode_str = headers.get("X-Incus-mode") or headers.get("X-LXD-mode") or "0"
+        try:
+            mode = int(mode_str, 8)
+        except ValueError:
+            mode = 0
+        return kind, resp.content, mode
+
 
 def _autodetect_socket() -> str:
     """Return the first existing socket from ``_DEFAULT_SOCKETS``.
