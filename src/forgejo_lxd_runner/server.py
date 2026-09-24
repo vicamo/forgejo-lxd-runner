@@ -7,6 +7,9 @@ at a time.
 
 Known simplifications, all called out in code:
 
+* ``Exec`` buffers the full command output before yielding. A later
+  commit will switch to the streaming websocket exec so long-running
+  commands report progress in real time.
 * ``CreateResponse`` reports a hardcoded filesystem layout and
   ``os=linux`` / ``arch=amd64``. Discovery from the running instance is
   a later commit.
@@ -153,9 +156,55 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
 
     def Exec(  # noqa: N802
-        self, request: plugin_pb2.ExecRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.ExecRequest,
+        context: grpc.ServicerContext,
     ) -> Iterator[plugin_pb2.ExecOutput]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Exec not implemented")
+        instance = self._instance(context, request.environment_id)
+
+        env = dict(request.env) if request.env else None
+        cwd = request.workdir or None
+        # ``request.user`` is proto3 ``optional string``. We accept only
+        # numeric UIDs for now (pylxd's execute() takes an int); name lookup
+        # is a later commit.
+        uid = 0
+        if request.HasField("user") and request.user:
+            try:
+                uid = int(request.user)
+            except ValueError:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"user must be a numeric UID for now, got {request.user!r}",
+                )
+
+        try:
+            # NOTE: buffered — see module docstring.
+            result = instance.execute(
+                list(request.command),
+                environment=env,
+                cwd=cwd,
+                user=uid,
+            )
+        except LXDAPIException as exc:
+            yield plugin_pb2.ExecOutput(
+                exec_failed=plugin_pb2.ExecFailed(error_message=str(exc)),
+            )
+            return
+
+        for stream, payload in (
+            (plugin_pb2.DataChunk.STDOUT, result.stdout),
+            (plugin_pb2.DataChunk.STDERR, result.stderr),
+        ):
+            if not payload:
+                continue
+            data = payload.encode() if isinstance(payload, str) else payload
+            yield plugin_pb2.ExecOutput(
+                data=plugin_pb2.DataChunk(stream=stream, data=data),
+            )
+
+        yield plugin_pb2.ExecOutput(
+            exec_complete=plugin_pb2.ExecComplete(exit_code=result.exit_code),
+        )
 
     def CopyIn(  # noqa: N802
         self, request_iterator: Iterator[plugin_pb2.CopyInChunk], context: grpc.ServicerContext
