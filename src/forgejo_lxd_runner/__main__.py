@@ -24,7 +24,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="gRPC bind address (e.g. unix:///path/to.sock or 127.0.0.1:50051).",
     )
     p.add_argument("--workers", type=int, default=16, help="Thread-pool size.")
-    p.add_argument("--log-level", default="INFO")
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        type=str.upper,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Root logger level (case-insensitive). Default: INFO.",
+    )
     return p
 
 
@@ -57,7 +63,7 @@ def serve(address: str, workers: int) -> None:
 def main() -> None:
     args = build_parser().parse_args()
     logging.basicConfig(
-        level=args.log_level.upper(),
+        level=args.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     serve(args.address, args.workers)
