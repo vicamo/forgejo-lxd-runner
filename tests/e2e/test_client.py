@@ -281,3 +281,101 @@ def test_launch_instance_reports_http_error_on_bad_payload(
     name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
     with pytest.raises(httpx.HTTPStatusError):
         client.launch_instance({"name": name}, timeout=30.0)
+
+
+# ---------------------------------------------------------------------------
+# get_instance_state / set_instance_state
+
+
+def test_get_instance_state_raises_for_unknown_name(client: BackendClient) -> None:
+    """Unknown instance names yield HTTP 404 → httpx.HTTPStatusError."""
+    name = f"forgejo-e2e-missing-{uuid.uuid4().hex[:10]}"
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        client.get_instance_state(name)
+    assert excinfo.value.response.status_code == 404
+
+
+# Two daemon-appropriate simplestreams sources. Canonical LXD 5.21 no
+# longer pulls from images.linuxcontainers.org (it silently completes
+# the create operation without provisioning the instance), so LXD uses
+# Canonical's own ubuntu-minimal remote; Incus keeps the community
+# images.linuxcontainers.org remote. Both are ~30-40 MB and boot fast.
+_TINY_IMAGE_SOURCES = {
+    "lxd": {
+        "type": "image",
+        "protocol": "simplestreams",
+        "server": "https://cloud-images.ubuntu.com/minimal/releases/",
+        "alias": "24.04",
+    },
+    "incus": {
+        "type": "image",
+        "protocol": "simplestreams",
+        "server": "https://images.linuxcontainers.org",
+        "alias": "alpine/edge",
+    },
+}
+
+
+def _tiny_image_source(client: BackendClient) -> dict[str, str]:
+    """Pick a daemon-appropriate image source from ``client.flavor``.
+
+    ``client.flavor`` is derived from the daemon's own ``/1.0``
+    self-description, so it stays accurate even when the socket path
+    is customised. Falls back to a skip when the daemon reports an
+    unknown flavour.
+    """
+    try:
+        return _TINY_IMAGE_SOURCES[client.flavor]
+    except KeyError:
+        pytest.skip(f"cannot pick a tiny image source for flavor {client.flavor!r}")
+
+
+def test_set_instance_state_completes_start_and_stop(
+    client: BackendClient,
+) -> None:
+    """set_instance_state drives a real instance through start and stop.
+
+    Uses a tiny bootable image so we can assert on the observable state
+    after each transition — with ``source.type=none`` the daemon accepts
+    ``start`` but the instance immediately falls back to Stopped, which
+    makes state assertions meaningless. Also pins the status_code enum
+    values the Start RPC's idempotence check keys off (102=Stopped,
+    103=Running).
+
+    ``stop`` uses ``force=True`` — a graceful shutdown takes seconds
+    even on a tiny image while force is instantaneous, and we're not
+    testing guest ACPI behaviour here.
+    """
+    source = _tiny_image_source(client)
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    try:
+        # First-time image pull can take a while; give the daemon room.
+        client.launch_instance({"name": name, "source": source}, timeout=180.0)
+
+        # Canonical LXD 5.21 has been observed silently completing the
+        # create operation as "success" without provisioning anything
+        # when the image remote is unreachable. Verify the instance
+        # actually landed before touching /state, so that failure mode
+        # points the finger at launch_instance instead of surfacing as
+        # a mysterious 404 later.
+        record = client.call("GET", f"/1.0/instances/{name}")
+        assert record.get("name") == name, (
+            f"launch_instance reported success but instance {name!r} is absent from the daemon"
+        )
+
+        # Fresh instance sits Stopped.
+        pre = client.get_instance_state(name)
+        assert pre.get("status") == "Stopped"
+        assert pre.get("status_code") == 102
+
+        client.set_instance_state(name, "start", timeout=60.0)
+        running = client.get_instance_state(name)
+        assert running.get("status") == "Running"
+        assert running.get("status_code") == 103
+
+        client.set_instance_state(name, "stop", force=True, timeout=30.0)
+        stopped = client.get_instance_state(name)
+        assert stopped.get("status") == "Stopped"
+        assert stopped.get("status_code") == 102
+    finally:
+        _delete_instance(client, name)

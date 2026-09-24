@@ -282,6 +282,49 @@ class BackendClient:
             "POST", "/1.0/instances", project=project, timeout=timeout, json=config
         )
 
+    def get_instance_state(
+        self,
+        name: str,
+        *,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the ``/1.0/instances/<name>/state`` metadata dict."""
+
+        return self.call("GET", f"/1.0/instances/{name}/state", project=project)
+
+    def set_instance_state(
+        self,
+        name: str,
+        action: str,
+        *,
+        project: str | None = None,
+        timeout: float | None = None,
+        force: bool = False,
+        stateful: bool = False,
+    ) -> dict[str, Any]:
+        """Drive an instance through a state transition and wait for it.
+
+        Wraps ``PUT /1.0/instances/<name>/state`` — the endpoint LXD /
+        Incus expose for ``start`` / ``stop`` / ``restart`` / ``freeze``
+        / ``unfreeze``. The daemon replies with a 202 + operation which
+        this helper blocks on via :meth:`run_operation`. ``timeout`` on
+        the payload stays at ``-1`` (no daemon-side deadline); the
+        keyword ``timeout`` argument is the client-side wait budget.
+        """
+
+        payload: dict[str, Any] = {"action": action, "timeout": -1}
+        if force:
+            payload["force"] = True
+        if stateful:
+            payload["stateful"] = True
+        return self.run_operation(
+            "PUT",
+            f"/1.0/instances/{name}/state",
+            project=project,
+            timeout=timeout,
+            json=payload,
+        )
+
 
 def _autodetect_socket() -> str:
     """Return the first existing socket from ``_DEFAULT_SOCKETS``.

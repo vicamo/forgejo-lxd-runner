@@ -26,6 +26,9 @@ from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 
 log = logging.getLogger(__name__)
 
+# LXD / Incus instance status codes we care about.
+_STATUS_RUNNING = 103
+
 
 class _Env:
     """Per-environment state tracked by the plugin."""
@@ -60,6 +63,18 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         self._client = BackendClient()
         self._envs: dict[str, _Env] = {}
         self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _lookup(self, context: grpc.ServicerContext, env_id: str) -> _Env:
+        with self._lock:
+            env = self._envs.get(env_id)
+        if env is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, f"unknown environment {env_id!r}")
+            raise AssertionError("unreachable")  # for type checkers
+        return env
 
     # ------------------------------------------------------------------
     # BackendPlugin RPCs
@@ -117,9 +132,22 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         )
 
     def Start(  # noqa: N802
-        self, request: plugin_pb2.StartRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.StartRequest,
+        context: grpc.ServicerContext,
     ) -> Iterator[plugin_pb2.StartOutput]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Start not implemented")
+        env = self._lookup(context, request.environment_id)
+        name = env.instance_name
+        try:
+            state = self._client.get_instance_state(name)
+            if state.get("status_code") != _STATUS_RUNNING:
+                self._client.set_instance_state(name, "start")
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"lxd start: {exc}")
+
+        log.info("started environment %s", request.environment_id)
+        # No image_env discovery yet.
+        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
 
     def Exec(  # noqa: N802
         self, request: plugin_pb2.ExecRequest, context: grpc.ServicerContext
