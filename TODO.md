@@ -62,8 +62,6 @@ same scope. The later sections are pure planning — nothing yet.
       also remove its `_envs` entry, and `Remove` must be idempotent
       on already-gone entries. Add a stress test that Creates + Removes
       thousands of environments and asserts `len(service._envs) == 0`.
-- [ ] Version-in-log: emit the package version at startup so
-      operator-side logs identify which build is running.
 - [ ] Signal-handler shutdown polish: current `_handle` in
       `__main__.serve` mixes `stop.set()` and `server.stop(grace=5)`;
       simplify to one path (stop checker → `server.stop(grace=…).wait()`).
