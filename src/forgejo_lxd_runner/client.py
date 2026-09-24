@@ -1,0 +1,344 @@
+"""Minimal REST client for the LXD / Incus ``/1.0`` API.
+
+Incus forked from LXD at API ``/1.0`` and kept the shape almost identical:
+the URL layout, JSON payload keys, async-operation model, and websocket
+endpoints for exec / file transfer all match. The differences we care
+about are the Unix socket path and, occasionally, which API extensions a
+given daemon advertises (for example ``oci_images`` — Incus-only, gates
+``docker:`` / ``oci:`` remote image references).
+
+``BackendClient`` speaks the shared subset over a Unix socket via
+``httpx``: one HTTP session, no per-project client cache (LXD's
+``pylxd.Client`` binds ``project`` at construction time — a papercut we
+sidestep by passing ``?project=`` per request). Every RPC-specific helper
+(``instances_create``, ``operation_wait``, exec / file transfer) grows in
+its own commit alongside the ``BackendPluginService`` method that needs
+it.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from typing import Any
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+
+# In autodetect order: Incus first (the newer, actively developed fork),
+# then the Snap-packaged LXD, then the distro LXD. First readable socket
+# wins. Operators pin a specific one by passing ``socket_path=``.
+_DEFAULT_SOCKETS = (
+    "/var/lib/incus/unix.socket",
+    "/var/snap/lxd/common/lxd/unix.socket",
+    "/var/lib/lxd/unix.socket",
+)
+
+
+class BackendUnavailableError(RuntimeError):
+    """No usable LXD / Incus Unix socket could be found."""
+
+
+class BackendOperationError(RuntimeError):
+    """An async LXD / Incus operation completed with ``status_code=400``.
+
+    Carries the daemon's ``err`` string in ``args[0]``. Distinct from
+    HTTP errors (``httpx.HTTPStatusError``) so callers can map
+    daemon-side failures to a different gRPC status than transport
+    failures.
+    """
+
+
+# ``/1.0/operations/<uuid>/wait`` long-polls: the daemon holds the request
+# open for at most ``?timeout=`` seconds, then returns the operation record
+# -- 200 Success / 400 Failure if it finished, otherwise a non-terminal code
+# (101 Started, 103 Running, ...) if it is still going (image download, VM
+# boot, ...). We poll in fixed windows rather than one unbounded blocking
+# read: a non-terminal code is positive proof the operation is still alive,
+# so the HTTP read budget only ever needs to cover a single window -- never
+# the whole (network-speed-dependent) operation.
+_OP_POLL_WINDOW = 30
+# Margin over the daemon's wait window for it to serialise and ship the reply.
+_OP_POLL_READ_MARGIN = 15
+# Floor on the time between two polls. A daemon that ignores ``?timeout=``
+# (or returns a non-terminal code immediately) would otherwise spin the loop
+# into a tight request storm; padding each poll out to this interval bounds
+# the request rate without adding latency when the long-poll window is
+# actually honoured.
+_OP_POLL_MIN_INTERVAL = 1.0
+
+
+class BackendClient:
+    """Thin ``httpx`` wrapper over the LXD / Incus ``/1.0`` REST API.
+
+    Parameters
+    ----------
+    socket_path:
+        Absolute path to the daemon's Unix socket. When ``None``, the
+        first path from ``_DEFAULT_SOCKETS`` that exists on disk is
+        picked; a missing socket raises ``BackendUnavailableError``.
+    """
+
+    def __init__(self, socket_path: str | None = None) -> None:
+        if socket_path is None:
+            socket_path = _autodetect_socket()
+        self.socket_path = socket_path
+        # ``base_url`` host is arbitrary — httpx needs *something* to
+        # assemble URLs against, but the actual transport is the Unix
+        # socket, so no DNS or TCP ever happens.
+        self._http = httpx.Client(
+            transport=httpx.HTTPTransport(uds=socket_path),
+            base_url="http://localhost",
+            timeout=httpx.Timeout(30.0, connect=5.0),
+        )
+        # Populated lazily on first ``server_info`` call. Cached because
+        # the answer is fixed for the daemon's lifetime and every
+        # capability check would otherwise round-trip.
+        self._server_info: dict[str, Any] | None = None
+        # Cached derivative of ``server_info``; computed on first access
+        # so ``flavor`` never re-parses the environment dict.
+        self._flavor: str | None = None
+
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> BackendClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    # ------------------------------------------------------------------
+    # Server capability probe
+
+    @property
+    def server_info(self) -> dict[str, Any]:
+        """The daemon's ``/1.0`` metadata dict, fetched once and cached.
+
+        The daemon returns everything we need to distinguish flavours
+        and negotiate features: ``environment.server_name`` (``"lxd"``
+        vs. ``"incus"``), ``api_extensions`` (feature flags such as
+        ``oci_images``), and ``api_version``. The first access
+        populates the cache; later accesses return it unchanged.
+        """
+
+        if self._server_info is None:
+            self._server_info = self.call("GET", "/1.0")
+        return self._server_info
+
+    @property
+    def flavor(self) -> str:
+        """``"incus"`` or ``"lxd"`` — whichever the daemon self-reports.
+
+        Falls back to ``"unknown"`` on daemons that don't set
+        ``environment.server``; callers should treat that as
+        "assume LXD-compatible subset only".
+        """
+
+        if self._flavor is not None:
+            return self._flavor
+        env = self.server_info.get("environment") or {}
+        name = str(env.get("server") or "").lower()
+        if name in {"incus", "lxd"}:
+            self._flavor = name
+        else:
+            self._flavor = "unknown"
+        return self._flavor
+
+    def supports(self, extension: str) -> bool:
+        """Whether the daemon advertises ``extension`` in ``api_extensions``.
+
+        Use this to gate features that only exist on one flavour — for
+        example ``supports("oci_images")`` before honouring an
+        ``oci:``/``docker:`` image reference.
+        """
+
+        exts = self.server_info.get("api_extensions") or []
+        return extension in exts
+
+    # ------------------------------------------------------------------
+    # Low-level HTTP
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        project: str | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Send a request to the daemon and return the raw response.
+
+        ``project`` is added as a ``?project=`` query parameter when
+        set — both LXD and Incus accept it in that form, which lets us
+        avoid the per-project client cache pylxd forces. Callers stay
+        responsible for interpreting the response body (sync vs. async
+        operation, error mapping, etc.); for the common cases prefer
+        :meth:`call` (sync endpoints) or :meth:`run_operation` (async).
+        """
+
+        params = dict(kwargs.pop("params", None) or {})
+        if project:
+            params["project"] = project
+        if params:
+            kwargs["params"] = params
+        return self._http.request(method, path, **kwargs)
+
+    def call(
+        self,
+        method: str,
+        path: str,
+        *,
+        project: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Send a synchronous request and return the ``metadata`` dict.
+
+        Wraps :meth:`request` for the common "call the API, get the
+        payload back" pattern: raises ``httpx.HTTPStatusError`` on non-2xx
+        via ``raise_for_status``, then unwraps ``response.json()["metadata"]``
+        (an empty dict when absent). Use this for endpoints that reply
+        synchronously — ``GET /1.0/instances/<name>``, ``GET /1.0/…/state``,
+        etc. For ``202 Accepted`` endpoints that hand back an operation,
+        use :meth:`run_operation` instead.
+        """
+
+        resp = self.request(method, path, project=project, **kwargs)
+        resp.raise_for_status()
+        return resp.json().get("metadata") or {}
+
+    # ------------------------------------------------------------------
+    # Async operations
+
+    def operation_wait(
+        self,
+        operation: dict[str, Any],
+        *,
+        project: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Block until an async operation finishes, then return its metadata.
+
+        ``operation`` is the ``metadata`` dict from a ``202 Accepted``
+        response -- every write endpoint on LXD/Incus returns one when it
+        kicks off background work (create / start / stop / delete / exec
+        / ...). We poll ``/1.0/operations/<uuid>/wait`` in fixed windows:
+        each poll long-polls for at most ``_OP_POLL_WINDOW`` seconds and
+        returns the operation record. ``status_code`` 200 means Success,
+        400 Failure; a non-terminal code (101 Started, 103 Running, ...)
+        is positive proof the operation is still in flight (downloading /
+        booting) -- we loop again. Polling in bounded windows keeps the
+        HTTP read budget fixed and independent of how long the operation
+        actually takes.
+
+        ``timeout`` is an overall wall-clock deadline. When it elapses
+        before the operation finishes we return the still-running record
+        (distinguished from success by its ``status_code``). ``timeout=
+        None`` waits indefinitely, looping while the daemon keeps
+        reporting the operation as still running.
+
+        Raises ``httpx.HTTPStatusError`` on non-2xx HTTP responses so
+        callers can map to gRPC status codes. A failed operation surfaces
+        as a ``BackendOperationError``; the two daemons signal it
+        differently and we handle both -- LXD returns a ``type="error"``
+        envelope (message in ``error``, ``metadata=null``) while Incus
+        returns a ``type="sync"`` envelope whose operation record carries
+        ``status_code`` 400/401 and the message in ``err`` -- both under
+        HTTP 200.
+        """
+
+        op_id = operation["id"]
+        path = f"/1.0/operations/{op_id}/wait"
+        # A fixed per-poll read budget covers one window plus the daemon's
+        # reply latency -- it never has to grow with the operation length.
+        read_timeout = httpx.Timeout(_OP_POLL_WINDOW + _OP_POLL_READ_MARGIN, connect=5.0)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            # Shrink the final poll's window so we never overshoot the
+            # caller's deadline waiting on the daemon.
+            window = _OP_POLL_WINDOW
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                window = max(1, min(_OP_POLL_WINDOW, int(remaining)))
+            poll_started = time.monotonic()
+            # ``/wait`` is itself a *synchronous* endpoint: it replies with
+            # the standard response envelope, not a bare operation record.
+            # Read the envelope so we can tell a finished/failed operation
+            # from a still-running one -- a failed op surfaces only in the
+            # envelope (``type="error"``), never in ``metadata``.
+            resp = self.request(
+                "GET",
+                path,
+                project=project,
+                params={"timeout": window},
+                timeout=read_timeout,
+            )
+            resp.raise_for_status()
+            envelope = resp.json()
+            if envelope.get("type") == "error":
+                # The operation failed; the message lives on the envelope.
+                raise BackendOperationError(str(envelope.get("error") or "operation failed"))
+            record = envelope.get("metadata") or {}
+            status = record.get("status_code")
+            if status == 200:
+                # Success -- the operation finished cleanly.
+                return record
+            if status in (400, 401):
+                # Some daemons (Incus) report a failed op *inside* the
+                # record (``status_code`` 400 Failure / 401 Cancelled) under
+                # a ``type="sync"`` envelope, rather than via ``type="error"``
+                # -- surface its ``err`` string the same way.
+                raise BackendOperationError(str(record.get("err") or "operation failed"))
+            # A non-terminal code (100 Created, 101 Started, 103 Running,
+            # 105 Pending, ...) is positive proof the operation is still in
+            # flight: the daemon's wait window elapsed before it finished.
+            # Give up once the overall deadline passes, reporting the
+            # still-running record; otherwise loop for another window.
+            if deadline is not None and time.monotonic() >= deadline:
+                return record
+            # A daemon that returns the non-terminal code faster than the
+            # requested window (ignoring ``?timeout=``) would spin the loop;
+            # pad each poll out to a minimum interval to bound the rate.
+            idle = _OP_POLL_MIN_INTERVAL - (time.monotonic() - poll_started)
+            if idle > 0:
+                time.sleep(idle)
+
+    def run_operation(
+        self,
+        method: str,
+        path: str,
+        *,
+        project: str | None = None,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Kick off an async operation and wait for it to finish.
+
+        Every write endpoint on LXD/Incus (instance create/start/stop/
+        delete, exec, file push, …) replies with ``202 Accepted`` and an
+        operation record. This helper posts the request via :meth:`call`
+        and then blocks on :meth:`operation_wait` until the operation
+        completes (or times out). Returns the final operation metadata.
+        """
+
+        operation = self.call(method, path, project=project, **kwargs)
+        return self.operation_wait(operation, project=project, timeout=timeout)
+
+
+def _autodetect_socket() -> str:
+    """Return the first existing socket from ``_DEFAULT_SOCKETS``.
+
+    Kept as a module-level helper so tests can monkey-patch it without
+    reaching into ``BackendClient.__init__``.
+    """
+
+    for candidate in _DEFAULT_SOCKETS:
+        if os.path.exists(candidate):
+            log.debug("using backend socket %s", candidate)
+            return candidate
+    raise BackendUnavailableError(
+        "no LXD / Incus Unix socket found; tried " + ", ".join(_DEFAULT_SOCKETS)
+    )
