@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: discover Python versions
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.pv.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: read version specifier from pyproject.toml
+        id: range
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          with open("pyproject.toml", "rb") as fh:
+              spec = tomllib.load(fh)["project"]["requires-python"]
+          print(f"specifier={spec}")
+          PY
+
+      - id: pv
+        uses: vicamo/actions-library/python-versions@v1
+        with:
+          # Single source of truth for the supported range is
+          # pyproject.toml's requires-python; the noxfile derives its
+          # PYTHON_VERSIONS the same way. Drop EOL series and collapse to
+          # the newest patch per X.Y for a compact, current matrix.
+          version-range: ${{ steps.range.outputs.specifier }}
+          latest-only: 'true'
+          exclude-eol: 'true'
+          platform: linux
+          platform-version: '24.04'
+          arch: x64
+
+  test:
+    name: nox / py ${{ matrix.python-version }}
+    needs: discover
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(needs.discover.outputs.versions) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: install nox
+        run: pip install nox
+
+      - name: generate protobuf stubs
+        run: nox -s proto
+
+      - name: lint
+        run: nox -s lint
+
+      - name: type-check
+        run: nox -s type
+
+      - name: unit tests
+        run: nox -s tests
