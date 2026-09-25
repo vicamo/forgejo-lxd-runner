@@ -258,6 +258,30 @@ class BackendClient:
         operation = self.call(method, path, project=project, **kwargs)
         return self.operation_wait(operation, project=project, timeout=timeout)
 
+    # ------------------------------------------------------------------
+    # Instance lifecycle
+
+    def launch_instance(
+        self,
+        config: dict[str, Any],
+        *,
+        project: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Create an instance from ``config`` and wait for it to be ready.
+
+        Wraps the two-step LXD/Incus create dance via :meth:`run_operation`:
+        ``POST /1.0/instances`` returns a ``202 Accepted`` with an operation
+        record, which we then wait on synchronously. Returns the completed
+        operation metadata; ``httpx.HTTPStatusError`` and
+        :class:`BackendOperationError` propagate so the caller can map
+        them to gRPC status codes.
+        """
+
+        return self.run_operation(
+            "POST", "/1.0/instances", project=project, timeout=timeout, json=config
+        )
+
 
 def _autodetect_socket() -> str:
     """Return the first existing socket from ``_DEFAULT_SOCKETS``.
