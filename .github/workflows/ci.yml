@@ -16,7 +16,7 @@ jobs:
     outputs:
       versions: ${{ steps.pv.outputs.versions }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: read version specifier from pyproject.toml
         id: range
@@ -52,7 +52,7 @@ jobs:
       matrix:
         python-version: ${{ fromJSON(needs.discover.outputs.versions) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
