@@ -81,21 +81,7 @@ class NestedRuntime:
 
     def run(self, *command: str) -> tuple[int, str, str]:
         """Run ``command`` and return ``(exit_code, stdout, stderr)``."""
-        out: list[bytes] = []
-        err: list[bytes] = []
-        rc = -1
-        for kind, data in self.client.exec_stream(self.name, list(command)):
-            if kind == "stdout":
-                out.append(data)
-            elif kind == "stderr":
-                err.append(data)
-            elif kind == "exit":
-                rc = int(data)
-        return (
-            rc,
-            b"".join(out).decode(errors="replace"),
-            b"".join(err).decode(errors="replace"),
-        )
+        return self.client.exec_capture(self.name, list(command))
 
     def sh(self, script: str) -> tuple[int, str, str]:
         """Run ``script`` through ``sh -c``."""

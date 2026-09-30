@@ -550,6 +550,48 @@ class BackendClient:
     # ------------------------------------------------------------------
     # Exec streaming
 
+    def exec_capture(
+        self,
+        name: str,
+        command: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        user: int | None = None,
+        cwd: str | None = None,
+        project: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run ``command`` to completion, returning ``(rc, stdout, stderr)``.
+
+        :meth:`exec_stream` yields frames, which is the shape the Exec
+        RPC needs but an awkward one for callers that just want a result
+        — probing for a binary, reading an image's metadata. Output is
+        decoded with ``errors="replace"``: these are diagnostics, and a
+        stray non-UTF-8 byte should not raise.
+        """
+
+        out: list[bytes] = []
+        err: list[bytes] = []
+        rc = -1
+        for kind, payload in self.exec_stream(
+            name,
+            command,
+            environment=environment,
+            user=user,
+            cwd=cwd,
+            project=project,
+        ):
+            if kind == "stdout":
+                out.append(payload)
+            elif kind == "stderr":
+                err.append(payload)
+            elif kind == "exit":
+                rc = int(payload)
+        return (
+            rc,
+            b"".join(out).decode(errors="replace"),
+            b"".join(err).decode(errors="replace"),
+        )
+
     def exec_stream(
         self,
         name: str,

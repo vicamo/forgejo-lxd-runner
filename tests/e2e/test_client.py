@@ -438,6 +438,14 @@ def test_exec_stream_captures_output_and_exit_codes(client: BackendClient) -> No
         frames = list(client.exec_stream(name, ["/bin/sh", "-c", "exit 42"]))
         exits = [p for k, p in frames if k == "exit"]
         assert exits == [42]
+
+        # 4. exec_capture folds all of the above into one tuple.
+        rc, out, err = client.exec_capture(
+            name, ["/bin/sh", "-c", "echo cap-out; echo cap-err 1>&2; exit 7"]
+        )
+        assert rc == 7
+        assert "cap-out" in out
+        assert "cap-err" in err
     finally:
         _delete_instance(client, name)
 
