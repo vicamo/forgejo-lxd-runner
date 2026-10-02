@@ -1,0 +1,42 @@
+description: |
+  Podman runtime for forgejo-lxd-runner jobs. Layers on top of `base`,
+  which supplies the nesting and syscall-interception knobs that make a
+  nested container runtime possible; this profile only installs podman.
+
+  Always apply it together with `base`, in that order:
+
+      profiles: "base,podman"
+
+  From a workflow label:
+
+      labels:
+        - "runner-podman:lxd://ubuntu:24.04?backend_options=profiles=base,podman"
+
+  Or load it into LXD directly:
+
+      lxc profile create forgejo-runner-podman < examples/profiles/podman.yaml
+
+  Unlike docker there is no daemon to enable — podman is a fork/exec
+  runtime, so a successful install is all that's needed. `podman info`
+  exiting zero is the readiness signal.
+
+  First boot pays for the install (roughly a minute or two on a warm
+  mirror), so prefer a pre-baked image for latency-sensitive runners:
+  launch once with this profile, wait for cloud-init to settle, then
+  `lxc publish` the result under an alias and point `label_arg` at it.
+
+  Requires working egress to the distribution's package mirrors from
+  inside the instance. A host firewall that drops traffic forwarded off
+  the LXD bridge — Docker on the host sets `FORWARD` policy `DROP`, a
+  common cause — will fail the install at boot.
+
+config:
+  # Nesting and syscall interception intentionally live in `base` so
+  # docker and podman can share them; this profile stays runtime-specific.
+  cloud-init.user-data: |
+    #cloud-config
+    package_update: true
+    packages:
+      - podman
+
+devices: {}
