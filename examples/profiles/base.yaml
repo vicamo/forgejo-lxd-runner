@@ -1,0 +1,39 @@
+description: |
+  Shared base profile for forgejo-lxd-runner jobs that need a nested
+  container runtime. On its own it does not install docker or podman —
+  it only sets the LXD-side knobs that make nesting *possible*. Combine
+  with a runtime-specific profile (e.g. `docker`, `podman`) once those
+  land in this directory:
+
+      profiles: "base,docker"
+
+  Apply from a workflow via the ``profiles`` backend option:
+
+      labels:
+        - "runner-nested:lxd://ubuntu:24.04?backend_options=profiles=base"
+
+  Or load it into LXD directly:
+
+      lxc profile create forgejo-runner-base < examples/profiles/base.yaml
+
+  If package downloads inside the instance stall and then recover, the
+  bridge is most likely advertising IPv6 it cannot route. Both daemons
+  default `ipv6.address` to `auto`, which generates a NAT'd `fd42::/64`
+  ULA regardless of whether the host has any IPv6 upstream, so the
+  instance believes it has IPv6 while the host has no default IPv6
+  route. Every name with an AAAA record is then tried over IPv6 first
+  and has to time out. Fix it on the bridge rather than per-tool, so
+  curl, git and image pulls benefit too:
+
+      lxc network set lxdbr0 ipv6.address none
+      incus network set incusbr0 ipv6.address none
+
+config:
+  # Allow nested user namespaces so a container runtime can start inside.
+  security.nesting: "true"
+  # Let the guest issue mknod / setxattr syscalls the parent otherwise
+  # blocks — required by most container runtimes when preparing images.
+  security.syscalls.intercept.mknod: "true"
+  security.syscalls.intercept.setxattr: "true"
+
+devices: {}

@@ -132,10 +132,6 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
 - [ ] `project`: run the instance under a named LXD project (per-tenant
       quotas, network isolation, ACLs). Pass `project` as a query
       parameter on each REST call; no per-project client state.
-- [ ] `profiles`: comma-separated LXD profile names applied to the
-      instance. Whitespace-stripped, empty entries dropped; when the
-      key is absent or effectively empty, LXD applies its own
-      `default` profile — do not synthesise `["default"]` ourselves.
 - [ ] `type`: forward `container` or `virtual-machine` verbatim to
       `config["type"]`. Reject anything else with `INVALID_ARGUMENT`.
 - [ ] `ephemeral`: parse the usual truthy/falsy strings
