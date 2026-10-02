@@ -86,7 +86,7 @@ jobs:
 
       - name: set up LXD
         if: matrix.backend == 'lxd'
-        uses: canonical/setup-lxd@v0.1.3
+        uses: canonical/setup-lxd@v1
         with:
           channel: 5.21/stable
 
