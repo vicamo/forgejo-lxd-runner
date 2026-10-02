@@ -63,7 +63,7 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
       - [ ] Start: populate `StartComplete.image_env` by running `env`
             in the started container (closes the `image_env` item
             below).
-      - [ ] Exec: `<runtime> exec` into the job container instead of
+      - [x] Exec: `<runtime> exec` into the job container instead of
             running on the instance.
       - [ ] Remove: tear the container down before the instance.
 
