@@ -129,6 +129,41 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             raise AssertionError("unreachable")  # for type checkers
         return env
 
+    def _read_env(self, env: _Env) -> dict[str, str]:
+        """Return the environment a step of ``env`` inherits.
+
+        Read at runtime by running ``env`` rather than from image
+        metadata: ``inspect`` reports what an image *declares*, which is
+        nothing for an image that bakes no ``ENV`` at all, while the
+        process a step actually runs always has a ``PATH``. The
+        executor's ``wrap()`` decides where that is, so the same probe
+        answers for a container and for the bare instance.
+
+        A failure is not worth losing a job over -- the runner falls
+        back to its own default ``PATH`` when the mapping is empty.
+        """
+        command, environment, user, cwd = env.executor.wrap(["env"])
+        try:
+            rc, out, _ = self._client.exec_capture(
+                env.instance_name,
+                command,
+                environment=environment,
+                user=user,
+                cwd=cwd,
+            )
+        except (httpx.HTTPError, BackendOperationError):
+            log.exception("failed to read the environment of %s", env.instance_name)
+            return {}
+        if rc != 0:
+            return {}
+
+        read: dict[str, str] = {}
+        for line in out.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                read[key] = value
+        return read
+
     def _discard(self, name: str) -> None:
         """Delete an instance Create is about to abandon.
 
@@ -279,8 +314,9 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
 
         log.info("started environment %s on %s", request.environment_id, env.executor)
-        # No image_env discovery yet.
-        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
+        yield plugin_pb2.StartOutput(
+            start_complete=plugin_pb2.StartComplete(image_env=self._read_env(env)),
+        )
 
     def Exec(  # noqa: N802
         self,

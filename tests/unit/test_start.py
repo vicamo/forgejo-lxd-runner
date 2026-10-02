@@ -38,6 +38,7 @@ def test_start_accepts_running_instance(
 ) -> None:
     """The happy path: Create left the instance running, Start confirms it."""
     mock_backend_client.get_instance_state.return_value = {"status_code": _STATUS_RUNNING}
+    mock_backend_client.exec_capture.return_value = (0, "PATH=/usr/bin\n", "")
 
     outs = _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
 
@@ -150,10 +151,14 @@ def test_start_without_an_image_never_probes_for_a_runtime(
 ) -> None:
     """The common case must not pay for a feature it does not use."""
     mock_backend_client.get_instance_state.return_value = {"status_code": _STATUS_RUNNING}
+    mock_backend_client.exec_capture.return_value = (0, "PATH=/usr/bin\n", "")
 
     _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
 
-    mock_backend_client.exec_capture.assert_not_called()
+    # Only the environment probe, run bare on the instance: no runtime
+    # is looked for and nothing is started.
+    commands = [c.args[1] for c in mock_backend_client.exec_capture.call_args_list]
+    assert commands == [["env"]]
     context.abort.assert_not_called()
 
 
@@ -165,14 +170,22 @@ def test_start_starts_the_job_container(
 ) -> None:
     """Create already pulled and created it; Start only starts it."""
     mock_backend_client.get_instance_state.return_value = {"status_code": _STATUS_RUNNING}
-    mock_backend_client.exec_capture.return_value = (0, "job-1-job", "")
+    mock_backend_client.exec_capture.side_effect = [
+        (0, "job-1-job", ""),  # docker start
+        (0, "PATH=/usr/bin:/bin\n", ""),  # docker exec env
+    ]
 
-    _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
+    outs = _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
 
     context.abort.assert_not_called()
+    assert outs[0].start_complete.image_env == {"PATH": "/usr/bin:/bin"}
 
+    # The env probe runs in the container, and only after it is started.
     commands = [c.args[1] for c in mock_backend_client.exec_capture.call_args_list]
-    assert commands == [["docker", "start", "job-1-job"]]
+    assert commands == [
+        ["docker", "start", "job-1-job"],
+        ["docker", "exec", "job-1-job", "env"],
+    ]
 
 
 def test_start_reports_a_container_that_will_not_start(
@@ -190,3 +203,78 @@ def test_start_reports_a_container_that_will_not_start(
         _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
 
     assert context.abort.call_args.args[0] == grpc.StatusCode.INTERNAL
+
+
+def test_start_reports_the_container_environment(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered_with_container: None,  # noqa: ARG001
+) -> None:
+    """A busybox image bakes no ENV, yet its container still has PATH.
+
+    Inspecting the image would hand the runner nothing and it would
+    fall back to a guessed PATH.
+    """
+    mock_backend_client.get_instance_state.return_value = {"status_code": _STATUS_RUNNING}
+    mock_backend_client.exec_capture.side_effect = [
+        (0, "", ""),  # start
+        (0, "PATH=/baked:/usr/bin:/bin\nHOME=/root\n", ""),  # env
+    ]
+
+    outs = _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
+
+    assert dict(outs[0].start_complete.image_env) == {
+        "PATH": "/baked:/usr/bin:/bin",
+        "HOME": "/root",
+    }
+    probe = mock_backend_client.exec_capture.call_args_list[-1].args[1]
+    assert probe == ["docker", "exec", "job-1-job", "env"]
+    assert "inspect" not in probe
+
+
+def test_start_reports_the_instance_environment_without_a_container(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered: None,  # noqa: ARG001
+) -> None:
+    """Same question, same answer: whatever `env` reports where steps run."""
+    mock_backend_client.get_instance_state.return_value = {"status_code": _STATUS_RUNNING}
+    mock_backend_client.exec_capture.return_value = (0, "PATH=/usr/bin:/bin\nLANG=C\n", "")
+
+    outs = _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
+
+    assert dict(outs[0].start_complete.image_env) == {"PATH": "/usr/bin:/bin", "LANG": "C"}
+    assert mock_backend_client.exec_capture.call_args.args[1] == ["env"]
+
+
+def test_start_keeps_an_environment_value_containing_an_equals_sign(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered: None,  # noqa: ARG001
+) -> None:
+    mock_backend_client.get_instance_state.return_value = {"status_code": _STATUS_RUNNING}
+    mock_backend_client.exec_capture.return_value = (0, "OPTS=a=1,b=2\n", "")
+
+    outs = _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
+
+    assert dict(outs[0].start_complete.image_env) == {"OPTS": "a=1,b=2"}
+
+
+def test_start_survives_a_failed_environment_probe(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered: None,  # noqa: ARG001
+) -> None:
+    """Losing env discovery is not worth losing the job over."""
+    mock_backend_client.get_instance_state.return_value = {"status_code": _STATUS_RUNNING}
+    mock_backend_client.exec_capture.return_value = (1, "", "boom")
+
+    outs = _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
+
+    assert outs[0].WhichOneof("Output") == "start_complete"
+    assert dict(outs[0].start_complete.image_env) == {}
+    context.abort.assert_not_called()
