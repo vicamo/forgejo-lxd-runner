@@ -515,6 +515,15 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             return plugin_pb2.RemoveResponse()
 
         name = env.instance_name
+        # Tear the container down first: deleting the instance would take
+        # it with it, but only the runtime can report a container that
+        # refused to die, and that is worth a log line before the
+        # evidence is destroyed.
+        try:
+            env.executor.cleanup()
+        except (httpx.HTTPError, BackendOperationError):
+            log.exception("failed to remove the job container of %s", name)
+
         try:
             self._client.remove_instance(name)
         except (httpx.HTTPError, BackendOperationError) as exc:
