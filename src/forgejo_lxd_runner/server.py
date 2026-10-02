@@ -304,9 +304,15 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 )
 
         try:
+            command, environ, uid, cwd = env.executor.wrap(
+                list(request.command),
+                environment=environ,
+                user=uid,
+                cwd=cwd,
+            )
             for kind, payload in self._client.exec_stream(
                 env.instance_name,
-                list(request.command),
+                command,
                 environment=environ,
                 user=uid,
                 cwd=cwd,
