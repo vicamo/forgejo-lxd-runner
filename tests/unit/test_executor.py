@@ -13,6 +13,8 @@ from forgejo_lxd_runner.executor import (
     ContainerExecutor,
     ExecutorError,
     HostExecutor,
+    Service,
+    ServiceSet,
     mount_specs,
     resolve,
 )
@@ -350,3 +352,138 @@ def test_wrap_omits_flags_it_was_not_given() -> None:
     argv, _, _, _ = executor.wrap(["id"], user=0)
 
     assert argv == ["docker", "exec", "--user", "0", "job-abc", "id"]
+
+
+# -----------------------
+# Service containers
+# -----------------------
+
+
+def make_service_set(client: MagicMock, *, network: str = "job-1") -> ServiceSet:
+    return ServiceSet(client=client, instance=INSTANCE, runtime="docker", network=network)
+
+
+def test_service_alias_is_the_workflow_name() -> None:
+    """Steps reach a service by the name the workflow gave it."""
+    assert Service(name="redis", image="redis:7", env={}, ports=[]).alias == "redis"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Redis", "redis"),
+        ("my_db", "my_db"),
+        ("pg.main", "pg_main"),
+        ("a b", "a_b"),
+    ],
+)
+def test_service_alias_is_sanitized_like_the_runner_would(name: str, expected: str) -> None:
+    """The runner attaches no alias of its own, so ours must match its rule."""
+    assert Service(name=name, image="x", env={}, ports=[]).alias == expected
+
+
+def test_services_on_a_network_are_aliased_for_name_resolution() -> None:
+    """A container job reaches a service by name, so it joins the network."""
+    client = make_client()
+    services = make_service_set(client)
+
+    services.create([Service(name="redis", image="redis:7", env={}, ports=[])])
+
+    assert client.calls[0] == ["docker", "network", "create", "job-1"]
+    assert client.calls[1] == ["docker", "pull", "redis:7"]
+    run = client.calls[2]
+    assert run[:4] == ["docker", "run", "--detach", "--name"]
+    assert run[run.index("--network") + 1] == "job-1"
+    assert run[run.index("--network-alias") + 1] == "redis"
+    assert run[-1] == "redis:7"
+    assert services.containers == ["forgejo-test-redis"]
+
+
+def test_services_without_a_network_publish_ports_only() -> None:
+    """A host job reaches a service at localhost:port, so no network is made."""
+    client = make_client()
+    services = make_service_set(client, network="")
+
+    services.create([Service(name="redis", image="redis:7", env={}, ports=["6379:6379"])])
+
+    assert not any("network" in c for c in client.calls)
+    run = client.calls[-1]
+    assert "--network" not in run
+    assert "--network-alias" not in run
+    assert run[run.index("--publish") + 1] == "6379:6379"
+    assert services.containers == ["forgejo-test-redis"]
+
+
+def test_service_env_and_ports_reach_the_runtime() -> None:
+    client = make_client()
+    services = make_service_set(client)
+
+    services.create(
+        [
+            Service(
+                name="db",
+                image="postgres:16",
+                env={"POSTGRES_PASSWORD": "pw"},
+                ports=["5432:5432"],
+            )
+        ]
+    )
+
+    run = client.calls[-1]
+    assert run[run.index("--env") + 1] == "POSTGRES_PASSWORD=pw"
+    assert run[run.index("--publish") + 1] == "5432:5432"
+
+
+def test_a_service_that_fails_to_start_names_itself() -> None:
+    """Three runtime calls can fail here; the message must say which service."""
+    client = make_client([(0, "", ""), (0, "", ""), (1, "", "no such image")])
+    services = make_service_set(client)
+
+    with pytest.raises(ExecutorError, match="'redis'"):
+        services.create([Service(name="redis", image="redis:7", env={}, ports=[])])
+
+
+def test_service_cleanup_removes_containers_before_the_network() -> None:
+    """A network with a container still attached refuses to go."""
+    client = make_client()
+    services = make_service_set(client)
+    services.create([Service(name="redis", image="redis:7", env={}, ports=[])])
+    client.calls.clear()
+
+    services.cleanup()
+
+    assert client.calls == [
+        ["docker", "rm", "--force", "forgejo-test-redis"],
+        ["docker", "network", "rm", "job-1"],
+    ]
+
+
+def test_service_cleanup_without_a_network_touches_no_network() -> None:
+    """A host job's services have none, so cleanup only removes containers."""
+    client = make_client()
+    services = make_service_set(client, network="")
+    services.create([Service(name="redis", image="redis:7", env={}, ports=[])])
+    client.calls.clear()
+
+    services.cleanup()
+
+    assert client.calls == [["docker", "rm", "--force", "forgejo-test-redis"]]
+
+
+def test_service_cleanup_is_best_effort() -> None:
+    """A stuck service must not keep the job's instance alive."""
+    client = make_client([(1, "", "device or resource busy")])
+    services = make_service_set(client)
+    services.containers.append("forgejo-test-redis")
+
+    services.cleanup()
+
+    assert ["docker", "network", "rm", "job-1"] in client.calls
+
+
+def test_no_services_still_leaves_nothing_behind() -> None:
+    """An empty list creates the network but no containers."""
+    client = make_client()
+    services = make_service_set(client)
+    services.create([])
+    assert services.containers == []

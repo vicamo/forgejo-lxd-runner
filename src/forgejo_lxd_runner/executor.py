@@ -27,8 +27,9 @@ instance, and the container sees the result at the same path.
 
 from __future__ import annotations
 
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .client import BackendClient
 
@@ -48,6 +49,12 @@ _DAEMON_POLL_INTERVAL = 2.0
 #: exec'd into it one at a time. Matches what the runner uses for its own
 #: job containers.
 _ENTRY_POINT = ("tail", "-f", "/dev/null")
+
+#: Matches the runner's own alias rule (`sanitizeNetworkAlias`): a
+#: service is reached by its workflow name, so the name we give the
+#: container has to survive the same transformation the runner would
+#: have applied on a Docker backend.
+_ALIAS_UNSAFE = re.compile("[^a-z0-9-]")
 
 
 class ExecutorError(RuntimeError):
@@ -208,6 +215,123 @@ class ContainerExecutor:
 
     def __str__(self) -> str:  # pragma: no cover — diagnostics only
         return f"{self.image} via {self.runtime} in {self.instance}"
+
+
+@dataclass(frozen=True)
+class Service:
+    """One entry of a workflow's ``services:`` block."""
+
+    name: str
+    image: str
+    env: dict[str, str]
+    ports: list[str]
+
+    @property
+    def alias(self) -> str:
+        """The hostname steps use to reach this service.
+
+        The runner sets ``ManagesOwnNetworking``, so it attaches no
+        aliases of its own and injects no hostnames into a step's
+        environment: whatever name we give the service here *is* the
+        address a workflow depends on. It must therefore be the
+        service's own name, sanitised exactly as the runner's Docker
+        backend would have.
+        """
+        return _ALIAS_UNSAFE.sub("_", self.name.lower())
+
+
+@dataclass
+class ServiceSet:
+    """The service containers of one job.
+
+    Services are containers whether or not the job itself is one. How a
+    step reaches them depends on where the step runs, and that is what
+    ``network`` selects:
+
+    * A step **on the instance** reaches a service at ``localhost`` on
+      the port it publishes -- the instance is the service's own docker
+      host. ``network`` is empty: the services need no shared network of
+      their own, only their published ports.
+    * A step **in a container** reaches a service by name, which the
+      default bridge will not resolve. ``network`` names a user-defined
+      network the services are aliased on and the job container joins,
+      so ``name`` resolves to the right service.
+
+    Instance isolation is the LXD instance's concern, not docker's: a
+    service network exists for name resolution, never to wall a job off
+    from its neighbours.
+    """
+
+    client: BackendClient
+    instance: str
+    runtime: str
+    network: str = ""
+    containers: list[str] = field(default_factory=list)
+
+    def _run(self, *args: str) -> tuple[int, str, str]:
+        return self.client.exec_capture(self.instance, [self.runtime, *args])
+
+    @staticmethod
+    def _last_line(out: str, err: str) -> str:
+        detail = (err.strip() or out.strip()).splitlines()
+        return detail[-1] if detail else "no output"
+
+    def create(self, services: list[Service]) -> None:
+        """Bring every service up, each publishing its ports.
+
+        Started here rather than in ``Start``: a service exists to be
+        connected to, and the job's first step may do so immediately.
+        Unlike the job container there is nothing to exec into later,
+        so there is no reason to hold one created-but-stopped.
+
+        With a ``network`` the services are aliased on it for a
+        container job to reach by name; without one they rely on their
+        published ports alone.
+        """
+        if self.network:
+            rc, out, err = self._run("network", "create", self.network)
+            if rc != 0:
+                raise ExecutorError(
+                    f"{self.runtime} network create {self.network!r} failed: "
+                    f"{self._last_line(out, err)}"
+                )
+
+        for service in services:
+            rc, out, err = self._run("pull", service.image)
+            if rc != 0:
+                raise ExecutorError(
+                    f"{self.runtime} pull {service.image!r} for service "
+                    f"{service.name!r} failed: {self._last_line(out, err)}"
+                )
+
+            name = f"{self.instance}-{service.alias}"
+            args = ["run", "--detach", "--name", name]
+            if self.network:
+                args += ["--network", self.network, "--network-alias", service.alias]
+            for key, value in service.env.items():
+                args += ["--env", f"{key}={value}"]
+            for port in service.ports:
+                args += ["--publish", port]
+            args.append(service.image)
+
+            rc, out, err = self._run(*args)
+            if rc != 0:
+                raise ExecutorError(
+                    f"{self.runtime} run {service.image!r} for service "
+                    f"{service.name!r} failed: {self._last_line(out, err)}"
+                )
+            self.containers.append(name)
+
+    def cleanup(self) -> None:
+        """Force-remove every service, then the network if it had one.
+
+        Best-effort and in that order: a network cannot go while a
+        container is still attached to it.
+        """
+        for name in self.containers:
+            self._run("rm", "--force", name)
+        if self.network:
+            self._run("network", "rm", self.network)
 
 
 Executor = HostExecutor | ContainerExecutor

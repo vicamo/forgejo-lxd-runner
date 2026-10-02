@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 
 from forgejo_lxd_runner.client import BackendClient, BackendUnavailableError
+from forgejo_lxd_runner.executor import Service, ServiceSet
 
 _EXAMPLE_PROFILES = Path(__file__).resolve().parents[2] / "examples" / "profiles"
 
@@ -272,6 +273,93 @@ def test_podman_profile_installs_a_usable_runtime(
     rc, out, err = nested.run("podman", "info", "--format", "{{.Host.OCIRuntime.Name}}")
     assert rc == 0, f"podman not usable: rc={rc} out={out!r} err={err!r}"
     assert out.strip(), "podman reported an empty OCI runtime name"
+
+
+# A service image that listens on its own, with no command to pass --
+# ServiceContainer carries none. whoami answers HTTP on :80 unconfigured
+# and is a few MB. The probe reads from the published port with python3,
+# which every cloud image already ships (cloud-init depends on it), so
+# the test pulls exactly one image.
+_SERVICE_IMAGE = "traefik/whoami"
+_SERVICE_PORT = 8080
+
+
+def _probe_port(nested: NestedRuntime, port: int) -> tuple[int, str, str]:
+    """Open the published port from inside the instance and read a byte.
+
+    A GET is enough: the service answers HTTP, but the point is reach-
+    ability, so any non-empty response off the published port proves the
+    host job could connect at localhost:<port>.
+    """
+    script = (
+        f"python3 - <<'PY'\n"
+        f"import socket\n"
+        f"s = socket.create_connection(('127.0.0.1', {port}), timeout=10)\n"
+        f"s.sendall(b'GET / HTTP/1.0\\r\\n\\r\\n')\n"
+        f"print(s.recv(64).decode('latin-1').splitlines()[0])\n"
+        f"s.close()\n"
+        f"PY"
+    )
+    return nested.sh(script)
+
+
+@pytest.mark.parametrize("nested", ["docker"], indirect=True)
+def test_services_publish_a_port_the_instance_can_reach(
+    _require_egress: None,
+    nested: NestedRuntime,
+) -> None:
+    """A host job's services bind the instance's ports, no network.
+
+    Drives the real ``ServiceSet`` with ``network=""`` -- the path a job
+    with ``services:`` but no ``container:`` takes -- against the live
+    docker daemon, then connects to the published port from inside the
+    instance exactly as such a job's step would at ``localhost:<port>``.
+    Pulling ``traefik/whoami`` needs registry egress the mirror probe
+    does not cover, so an image-pull failure skips rather than fails.
+    """
+    status = nested.wait_for_cloud_init()
+    assert status == "done", f"cloud-init did not finish cleanly: {nested.diagnostics()}"
+
+    services = ServiceSet(
+        client=nested.client,
+        instance=nested.name,
+        runtime="docker",
+        network="",
+    )
+    service = Service(
+        name="probe",
+        image=_SERVICE_IMAGE,
+        env={},
+        ports=[f"{_SERVICE_PORT}:80"],
+    )
+    try:
+        try:
+            services.create([service])
+        except Exception as exc:  # noqa: BLE001
+            text = str(exc)
+            if any(s in text for s in ("dial tcp", "TLS handshake", "no such host")):
+                pytest.skip(f"registry unreachable from inside the instance: {text[:300]}")
+            raise
+
+        # The daemon reports the container started before the process
+        # inside has bound its port; retry the connect briefly.
+        deadline = time.monotonic() + 30.0
+        line = ""
+        while time.monotonic() < deadline:
+            rc, out, _ = _probe_port(nested, _SERVICE_PORT)
+            line = out.strip()
+            if rc == 0 and line:
+                break
+            time.sleep(2.0)
+
+        assert line.startswith("HTTP/"), (
+            f"nothing answered on the published port: {line!r}; "
+            f"docker ps: {nested.sh('docker ps -a')[1]!r}"
+        )
+        assert services.containers == [f"{nested.name}-probe"]
+    finally:
+        with contextlib.suppress(Exception):
+            services.cleanup()
 
 
 @pytest.mark.parametrize("nested", ["docker"], indirect=True)
