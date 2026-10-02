@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from forgejo_lxd_runner.client import BackendOperationError
-from forgejo_lxd_runner.executor import ContainerExecutor, HostExecutor
+from forgejo_lxd_runner.executor import ContainerExecutor, HostExecutor, ServiceSet
 from forgejo_lxd_runner.proto.plugin.v1alpha import plugin_pb2
 from forgejo_lxd_runner.server import BackendPluginService, _Env
 
@@ -157,3 +157,52 @@ def test_remove_without_a_container_touches_only_the_instance(
 
     mock_backend_client.exec_capture.assert_not_called()
     mock_backend_client.remove_instance.assert_called_once_with("job-1")
+
+
+def test_remove_tears_services_down_after_the_job_container(
+    service: BackendPluginService, context: MagicMock, mock_backend_client: MagicMock
+) -> None:
+    """The job container has to leave the network before the network can go."""
+    mock_backend_client.exec_capture.return_value = (0, "", "")
+    services = ServiceSet(
+        client=mock_backend_client,
+        instance="job-1",
+        runtime="docker",
+        network="job-1",
+    )
+    services.containers.append("job-1-redis")
+    service._envs["job-1"] = _Env(  # noqa: SLF001
+        instance_name="job-1",
+        executor=ContainerExecutor(
+            client=mock_backend_client,
+            instance="job-1",
+            image="alpine",
+            runtime="docker",
+            container="job-1-job",
+        ),
+        services=services,
+    )
+
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    calls = [c.args[1] for c in mock_backend_client.exec_capture.call_args_list]
+    job_rm = calls.index(["docker", "rm", "--force", "job-1-job"])
+    svc_rm = calls.index(["docker", "rm", "--force", "job-1-redis"])
+    net_rm = calls.index(["docker", "network", "rm", "job-1"])
+    assert job_rm < svc_rm < net_rm
+    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+
+
+def test_remove_without_services_touches_no_network(
+    service: BackendPluginService, context: MagicMock, mock_backend_client: MagicMock
+) -> None:
+    mock_backend_client.exec_capture.return_value = (0, "", "")
+    service._envs["job-1"] = _Env(  # noqa: SLF001
+        instance_name="job-1",
+        executor=HostExecutor(client=mock_backend_client, instance="job-1"),
+    )
+
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    calls = [c.args[1] for c in mock_backend_client.exec_capture.call_args_list]
+    assert not any("network" in c for c in calls)
