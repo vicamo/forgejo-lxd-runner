@@ -28,7 +28,15 @@ import grpc
 import httpx
 
 from .client import BackendClient, BackendOperationError
-from .executor import Executor, ExecutorError, mount_specs, resolve
+from .executor import (
+    ContainerExecutor,
+    Executor,
+    ExecutorError,
+    Service,
+    ServiceSet,
+    mount_specs,
+    resolve,
+)
 from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 
 log = logging.getLogger(__name__)
@@ -74,9 +82,15 @@ class _Env:
     respond by issuing ``Remove`` for that ``environment_id``.
     """
 
-    __slots__ = ("executor", "instance_name", "job_image")
+    __slots__ = ("executor", "instance_name", "job_image", "services")
 
-    def __init__(self, instance_name: str, executor: Executor, job_image: str = "") -> None:
+    def __init__(
+        self,
+        instance_name: str,
+        executor: Executor,
+        job_image: str = "",
+        services: ServiceSet | None = None,
+    ) -> None:
         self.instance_name = instance_name
         #: The workflow's ``container.image``, empty when the job has no
         #: ``container:`` block — the common case. When set, the job runs
@@ -90,6 +104,11 @@ class _Env:
         #: replaced it, and anything reading it there would silently run
         #: the job in the wrong place.
         self.executor = executor
+        #: The job's service containers and the network they share, or
+        #: ``None`` when the workflow declared no ``services:``. Kept so
+        #: ``Remove`` can tear them down: they outlive every other RPC,
+        #: since a step may connect to one at any point.
+        self.services = services
 
 
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
@@ -128,6 +147,57 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(grpc.StatusCode.NOT_FOUND, f"unknown environment {env_id!r}")
             raise AssertionError("unreachable")  # for type checkers
         return env
+
+    def _start_services(
+        self,
+        name: str,
+        executor: Executor,
+        requested: list[plugin_pb2.ServiceContainer],
+    ) -> ServiceSet | None:
+        """Bring a job's ``services:`` up, or return ``None`` if it has none.
+
+        Services are containers whether or not the job itself is one, so
+        they run on the runtime ``resolve()`` already found for the
+        instance.
+
+        A containerised job reaches a service by name, so its services
+        share a user-defined network -- named after the instance, which
+        is already unique per environment -- that the job container
+        joins. A job on the instance reaches a service at ``localhost``
+        on its published port, so its services need no network of their
+        own. Isolation between jobs is the instance's concern, not this
+        network's.
+        """
+        if not requested:
+            return None
+
+        if not executor.runtime:
+            raise ExecutorError(
+                f"no container runtime in instance {name!r}: the job's "
+                "`services:` need one inside the instance. Apply a runtime "
+                'profile (e.g. `profiles: "base,docker"`) or use an instance '
+                "image that ships one",
+                precondition=True,
+            )
+
+        services = ServiceSet(
+            client=self._client,
+            instance=name,
+            runtime=executor.runtime,
+            network=name if isinstance(executor, ContainerExecutor) else "",
+        )
+        services.create(
+            [
+                Service(
+                    name=service.name,
+                    image=service.image,
+                    env=dict(service.env),
+                    ports=list(service.ports),
+                )
+                for service in requested
+            ]
+        )
+        return services
 
     def _read_env(self, env: _Env) -> dict[str, str]:
         """Return the environment a step of ``env`` inherits.
@@ -240,10 +310,12 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # left behind for an operator to find.
         try:
             executor = resolve(self._client, name, request.image)
+            services = self._start_services(name, executor, list(request.services))
             executor.create(
                 f"{name}-job",
                 workdir=_ROOT_PATH,
                 mounts=mount_specs(list(_JOB_CONTAINER_MOUNTS)),
+                network=services.network if services else "",
             )
         except ExecutorError as exc:
             self._discard(name)
@@ -264,6 +336,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 instance_name=name,
                 executor=executor,
                 job_image=request.image,
+                services=services,
             )
 
         log.info("created environment %s from image %s on %s", name, image, executor)
@@ -523,6 +596,14 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             env.executor.cleanup()
         except (httpx.HTTPError, BackendOperationError):
             log.exception("failed to remove the job container of %s", name)
+
+        if env.services is not None:
+            # After the job container, which was attached to their
+            # network: it has to leave before the network can go.
+            try:
+                env.services.cleanup()
+            except (httpx.HTTPError, BackendOperationError):
+                log.exception("failed to remove the services of %s", name)
 
         try:
             self._client.remove_instance(name)

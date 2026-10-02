@@ -302,3 +302,108 @@ def test_create_keeps_the_instance_when_there_is_no_job_container(
     service.Create(_req(), context)
 
     mock_backend_client.remove_instance.assert_not_called()
+
+
+# -----------------------
+# Service containers
+# -----------------------
+
+
+def _svc(**kw: object) -> plugin_pb2.ServiceContainer:
+    kw.setdefault("name", "redis")
+    kw.setdefault("image", "redis:7")
+    return plugin_pb2.ServiceContainer(**kw)  # type: ignore[arg-type]
+
+
+def _runtime_calls(mock_backend_client: MagicMock) -> list[list[str]]:
+    return [call.args[1] for call in mock_backend_client.exec_capture.call_args_list]
+
+
+def test_create_without_services_creates_no_network(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """Detection still happens; a job with no services just uses nothing."""
+    mock_backend_client.exec_capture.return_value = (0, "", "")
+
+    service.Create(_req(), context)
+
+    calls = _runtime_calls(mock_backend_client)
+    assert not any("network" in c for c in calls)
+    assert service._envs["job-1"].services is None  # noqa: SLF001
+
+
+def test_create_starts_services_for_a_job_with_no_container(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """Services are containers even when the job itself runs on the instance.
+
+    The job reaches them at localhost on their published ports, so they
+    need no network of their own.
+    """
+    mock_backend_client.exec_capture.return_value = (0, "", "")
+
+    service.Create(_req(services=[_svc(ports=["6379:6379"])]), context)
+
+    calls = _runtime_calls(mock_backend_client)
+    assert not any("network" in c for c in calls)
+    run = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--network" not in run
+    assert run[run.index("--publish") + 1] == "6379:6379"
+    assert service._envs["job-1"].services is not None  # noqa: SLF001
+
+
+def test_create_joins_the_job_container_to_the_service_network(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """A step reaches a service by name only if both share a network."""
+    mock_backend_client.exec_capture.return_value = (0, "", "")
+
+    service.Create(_req(image="alpine", services=[_svc()]), context)
+
+    create = next(c for c in _runtime_calls(mock_backend_client) if c[:2] == ["docker", "create"])
+    assert create[create.index("--network") + 1] == "job-1"
+
+
+def test_create_discards_the_instance_when_a_service_fails(
+    service: BackendPluginService,
+    context: MagicMock,
+    aborted: type[Exception],
+    mock_backend_client: MagicMock,
+) -> None:
+    """Create never returned an id, so nothing would ever Remove the instance."""
+    mock_backend_client.exec_capture.side_effect = [
+        (0, "/usr/bin/docker", ""),  # command -v docker
+        (1, "", ""),  # command -v podman
+        (0, "Server: Docker", ""),  # docker version
+        (1, "", "no such image"),  # pull
+    ]
+
+    with pytest.raises(aborted):
+        service.Create(_req(services=[_svc()]), context)
+
+    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    assert "job-1" not in service._envs  # noqa: SLF001
+
+
+def test_create_rejects_services_on_an_instance_with_no_runtime(
+    service: BackendPluginService,
+    context: MagicMock,
+    aborted: type[Exception],
+    mock_backend_client: MagicMock,
+) -> None:
+    """Absence only becomes an error once something asks for a runtime."""
+    mock_backend_client.exec_capture.return_value = (1, "", "not found")
+
+    with pytest.raises(aborted) as exc:
+        service.Create(_req(services=[_svc()]), context)
+
+    assert exc.value.code == grpc.StatusCode.FAILED_PRECONDITION
+    # The message has to name what wanted it.
+    assert "services:" in str(exc.value)
+    mock_backend_client.remove_instance.assert_called_once_with("job-1")
