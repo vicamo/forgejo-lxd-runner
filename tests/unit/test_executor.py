@@ -53,8 +53,19 @@ def test_resolve_without_image_runs_on_the_host() -> None:
     executor = resolve(client, INSTANCE, "")
 
     assert isinstance(executor, HostExecutor)
-    # Nothing was probed: there is no runtime requirement at all.
-    assert client.calls == []
+    # The runtime is still detected: what the job runs in does not
+    # change what the instance has.
+    assert executor.runtime == "docker"
+
+
+def test_resolve_records_a_missing_runtime_for_a_host_job() -> None:
+    """An instance with no runtime is a fact to carry, not a failure."""
+    client = make_client([(1, "", ""), (1, "", "")])
+
+    executor = resolve(client, INSTANCE, "")
+
+    assert isinstance(executor, HostExecutor)
+    assert executor.runtime == ""
 
 
 @pytest.mark.parametrize("runtime", ["docker", "podman"])

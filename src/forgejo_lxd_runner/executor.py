@@ -76,6 +76,11 @@ class HostExecutor:
 
     client: BackendClient
     instance: str
+    #: The container runtime available inside the instance, or ``""``
+    #: when it ships none. Unused by this executor -- a job running on
+    #: the instance needs no runtime to run its own steps -- but a job
+    #: can still want one for what runs *alongside* it.
+    runtime: str = ""
 
     def create(self, name: str, *, workdir: str, mounts: list[str]) -> None:
         """Nothing to create — the instance is the execution context.
@@ -208,41 +213,32 @@ class ContainerExecutor:
 Executor = HostExecutor | ContainerExecutor
 
 
-def resolve(client: BackendClient, instance: str, image: str) -> Executor:
-    """Pick the execution context for a job.
+def detect_runtime(client: BackendClient, instance: str) -> str:
+    """Return the container runtime available inside ``instance``, or ``""``.
 
-    Empty ``image`` — the common case — runs on the instance. Otherwise
-    probe for a container runtime and wait for it to answer, which for
-    docker means waiting on the daemon socket.
+    Probe for each known runtime and wait for the one found to answer,
+    which for docker means waiting on the daemon socket: the instance
+    reports Running before systemd has finished starting the unit.
+
+    Finding none is a fact about the instance, not a failure: a job
+    that runs on the instance needs no runtime. Only a job that asks
+    for one turns its absence into an error, so that the message can
+    say what wanted it.
     """
-    if not image:
-        return HostExecutor(client=client, instance=instance)
-
     available = [
         runtime
         for runtime in _RUNTIMES
         if client.exec_capture(instance, ["sh", "-c", f"command -v {runtime}"])[0] == 0
     ]
     if not available:
-        raise ExecutorError(
-            f"no container runtime in instance {instance!r}: the job sets "
-            f"`container.image`, which needs {' or '.join(_RUNTIMES)} inside the "
-            'instance. Apply a runtime profile (e.g. `profiles: "base,docker"`) '
-            "or use an instance image that ships one",
-            precondition=True,
-        )
+        return ""
 
     runtime = available[0]
     deadline = time.monotonic() + _DAEMON_READY_TIMEOUT
     while True:
         rc, _, err = client.exec_capture(instance, [runtime, "version"])
         if rc == 0:
-            return ContainerExecutor(
-                client=client,
-                instance=instance,
-                image=image,
-                runtime=runtime,
-            )
+            return runtime
         if time.monotonic() >= deadline:
             raise ExecutorError(
                 f"{runtime} is installed in instance {instance!r} but did not "
@@ -251,6 +247,38 @@ def resolve(client: BackendClient, instance: str, image: str) -> Executor:
                 precondition=True,
             )
         time.sleep(_DAEMON_POLL_INTERVAL)
+
+
+def resolve(client: BackendClient, instance: str, image: str) -> Executor:
+    """Pick the execution context for a job.
+
+    Empty ``image`` -- the common case -- runs on the instance.
+    Otherwise the job is containerised on the instance's runtime.
+
+    The runtime is detected either way: what a job runs *in* does not
+    change what the instance *has*, and an execution context that knows
+    its instance's runtime can act on it whatever the job asked for.
+    """
+    runtime = detect_runtime(client, instance)
+
+    if not image:
+        return HostExecutor(client=client, instance=instance, runtime=runtime)
+
+    if not runtime:
+        raise ExecutorError(
+            f"no container runtime in instance {instance!r}: the job's "
+            f"`container.image` needs {' or '.join(_RUNTIMES)} inside the "
+            'instance. Apply a runtime profile (e.g. `profiles: "base,docker"`) '
+            "or use an instance image that ships one",
+            precondition=True,
+        )
+
+    return ContainerExecutor(
+        client=client,
+        instance=instance,
+        image=image,
+        runtime=runtime,
+    )
 
 
 def mount_specs(paths: list[str]) -> list[str]:

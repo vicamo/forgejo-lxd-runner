@@ -185,15 +185,33 @@ def test_create_prepares_the_job_container(
     assert service._envs["job-1"].executor is not None  # noqa: SLF001
 
 
-def test_create_without_an_image_never_probes_for_a_runtime(
+def test_create_without_an_image_still_detects_the_runtime(
     service: BackendPluginService,
     context: MagicMock,
     mock_backend_client: MagicMock,
 ) -> None:
-    """The common case must not pay for a feature it does not use."""
+    """The instance's runtime is recorded whatever the job runs in."""
+    mock_backend_client.exec_capture.return_value = (0, "", "")
+
     service.Create(_req(), context)
 
-    mock_backend_client.exec_capture.assert_not_called()
+    probes = [c.args[1] for c in mock_backend_client.exec_capture.call_args_list]
+    assert ["sh", "-c", "command -v docker"] in probes
+    assert service._envs["job-1"].executor.runtime == "docker"  # noqa: SLF001
+    context.abort.assert_not_called()
+
+
+def test_create_without_an_image_survives_an_instance_with_no_runtime(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """A plain job on a plain image is the common case, not a failure."""
+    mock_backend_client.exec_capture.return_value = (1, "", "not found")
+
+    service.Create(_req(), context)
+
+    assert service._envs["job-1"].executor.runtime == ""  # noqa: SLF001
     context.abort.assert_not_called()
 
 
