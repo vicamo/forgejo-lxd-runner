@@ -39,6 +39,7 @@ def test_create_start_remove_lifecycle(
     # whole state/stop/delete dance to BackendClient.remove_instance.
     mock_backend_client.get_instance_state.return_value = {"status_code": 103}
     mock_backend_client.call.return_value = {"expanded_config": {}}
+    mock_backend_client.exec_capture.return_value = (0, "PATH=/usr/bin\n", "")
 
     create_resp = plugin_stub.Create(
         plugin_pb2.CreateRequest(name="job-1", label_arg="ubuntu:24.04")

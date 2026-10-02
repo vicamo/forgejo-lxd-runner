@@ -60,7 +60,7 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
             leave `Create` claiming success for an environment that
             cannot exist.
       - [x] Start: start the created container.
-      - [ ] Start: populate `StartComplete.image_env` by running `env`
+      - [x] Start: populate `StartComplete.image_env` by running `env`
             in the started container (closes the `image_env` item
             below).
       - [x] Exec: `<runtime> exec` into the job container instead of
@@ -100,7 +100,7 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
       defaults to `":"`); deferred until a non-POSIX backend lands.
 - [ ] `CreateResponse.environment_case_insensitive`: leave unset (=
       `false`); Linux env is case-sensitive. Deferred, same rationale.
-- [ ] `StartComplete.image_env`: run `env` where the job's steps run
+- [x] `StartComplete.image_env`: run `env` where the job's steps run
       and surface what it reports, so those steps see the environment
       they inherit without the author re-declaring it.
 - [ ] `ExecRequest.user` (name form): `Exec` currently accepts only
