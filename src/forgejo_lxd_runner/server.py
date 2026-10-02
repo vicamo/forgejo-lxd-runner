@@ -40,7 +40,27 @@ _COPY_CHUNK_SIZE = 256 * 1024
 
 
 class _Env:
-    """Per-environment state tracked by the plugin."""
+    """Per-environment state tracked by the plugin.
+
+    Lifetime is bounded exclusively by ``Create`` -> ``Remove``. Every
+    other RPC (``Start``, ``Exec``, ``CopyIn``, ``CopyOut``) reads
+    ``_envs`` but never mutates it, even when the daemon reports the
+    instance as gone (HTTP 404) or otherwise unreachable. Two reasons:
+
+    * The plugin-Forgejo contract is: Forgejo creates and Forgejo
+      removes. Silently dropping the record on a mid-RPC 404 would
+      desync the two views of the world — Forgejo still thinks the
+      env exists and will eventually call ``Remove`` on it. ``Remove``
+      is idempotent, so that's not fatal, but the desync buys nothing
+      in exchange.
+    * A transient error that happens to surface as 404 must not
+      silently invalidate a running job's environment record.
+
+    An instance that disappears out-of-band (operator intervention,
+    daemon reset) is an invariant violation the plugin surfaces
+    loudly as ``INTERNAL`` on the affected RPC. The caller should
+    respond by issuing ``Remove`` for that ``environment_id``.
+    """
 
     __slots__ = ("instance_name",)
 
@@ -350,6 +370,24 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             tar.addfile(info, io.BytesIO(data))
 
     def Remove(  # noqa: N802
-        self, request: plugin_pb2.RemoveRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.RemoveRequest,
+        context: grpc.ServicerContext,
     ) -> plugin_pb2.RemoveResponse:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Remove not implemented")
+        env_id = request.environment_id
+        with self._lock:
+            env = self._envs.pop(env_id, None)
+        # Idempotent: Remove after a failed Create, or a duplicate teardown,
+        # should not raise.
+        if env is None:
+            log.debug("remove: environment %s already gone from map", env_id)
+            return plugin_pb2.RemoveResponse()
+
+        name = env.instance_name
+        try:
+            self._client.remove_instance(name)
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"lxd remove: {exc}")
+
+        log.info("removed environment %s", env_id)
+        return plugin_pb2.RemoveResponse()

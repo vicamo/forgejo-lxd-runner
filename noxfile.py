@@ -131,7 +131,7 @@ def type(session: nox.Session) -> None:
 @nox.session(python=PYTHON_VERSIONS)
 def tests(session: nox.Session) -> None:
     session.install("-e", ".[dev]")
-    session.run("pytest", "tests/unit", "tests/test_version.py", *session.posargs)
+    session.run("pytest", "tests/unit", "tests/grpc", "tests/test_version.py", *session.posargs)
 
 
 @nox.session
