@@ -487,3 +487,24 @@ def test_no_services_still_leaves_nothing_behind() -> None:
     services = make_service_set(client)
     services.create([])
     assert services.containers == []
+
+
+def test_job_container_joins_the_service_network() -> None:
+    """A step reaches a service by name only if both share a network."""
+    client = make_client()
+    executor = ContainerExecutor(client=client, instance=INSTANCE, image="alpine", runtime="docker")
+
+    executor.create("job-1-job", workdir="/w", mounts=[], network="job-1")
+
+    create = client.calls[-1]
+    assert create[create.index("--network") + 1] == "job-1"
+
+
+def test_job_container_without_services_joins_no_network() -> None:
+    """The runtime picks its own default when the job has no services."""
+    client = make_client()
+    executor = ContainerExecutor(client=client, instance=INSTANCE, image="alpine", runtime="docker")
+
+    executor.create("job-1-job", workdir="/w", mounts=[])
+
+    assert "--network" not in client.calls[-1]

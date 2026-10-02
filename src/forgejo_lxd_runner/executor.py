@@ -89,11 +89,13 @@ class HostExecutor:
     #: can still want one for what runs *alongside* it.
     runtime: str = ""
 
-    def create(self, name: str, *, workdir: str, mounts: list[str]) -> None:
+    def create(self, name: str, *, workdir: str, mounts: list[str], network: str = "") -> None:
         """Nothing to create — the instance is the execution context.
 
         ``mounts`` is irrelevant here: the paths the caller would bind
-        are already the instance's own filesystem.
+        are already the instance's own filesystem. So is ``network``:
+        a job on the instance reaches its services over the instance's
+        own stack, by the ports they publish onto it.
         """
 
     def start(self) -> None:
@@ -142,7 +144,7 @@ class ContainerExecutor:
         detail = (err.strip() or out.strip()).splitlines()
         return detail[-1] if detail else "no output"
 
-    def create(self, name: str, *, workdir: str, mounts: list[str]) -> None:
+    def create(self, name: str, *, workdir: str, mounts: list[str], network: str = "") -> None:
         """Pull the image and create an idle container named ``name``.
 
         Created but not started, mirroring the ``Create`` RPC this serves:
@@ -152,7 +154,8 @@ class ContainerExecutor:
 
         ``mounts`` are bound at identical paths inside the container, so
         the layout promised in ``CreateResponse`` stays true on both
-        sides.
+        sides. ``network``, when the job has services, joins the
+        container to theirs so a step can reach them by name.
         """
         rc, out, err = self._run("pull", self.image)
         if rc != 0:
@@ -161,6 +164,8 @@ class ContainerExecutor:
             )
 
         args = ["create", "--name", name, "--workdir", workdir]
+        if network:
+            args += ["--network", network]
         for mount in mounts:
             args += ["--volume", mount]
         args += [self.image, *_ENTRY_POINT]
