@@ -44,7 +44,7 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
 
       Implementation, one commit per step:
 
-      - [ ] Create: pull the image and create an idle job container
+      - [x] Create: pull the image and create an idle job container
             (`tail -f /dev/null`, matching GitHub's `ContainerEntryPoint`)
             on the instance, bind-mounting at identical paths exactly
             the three directories `CreateResponse` promises —
@@ -54,12 +54,12 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
             declare, not an approximation of act's Docker binds.
             `image` empty means no container: the job runs on the
             instance itself and every step below is a no-op.
-      - [ ] Create, not Start, owns this: `Create` is `docker create`
+      - [x] Create, not Start, owns this: `Create` is `docker create`
             and `Start` is `docker start`. Pulling in `Start` would
             report a bad image reference against the wrong RPC and
             leave `Create` claiming success for an environment that
             cannot exist.
-      - [ ] Start: start the created container.
+      - [x] Start: start the created container.
       - [ ] Start: populate `StartComplete.image_env` by running `env`
             in the started container (closes the `image_env` item
             below).
