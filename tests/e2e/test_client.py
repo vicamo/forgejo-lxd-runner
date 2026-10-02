@@ -13,10 +13,12 @@ import os
 import uuid
 from collections.abc import Iterator
 
+import httpx
 import pytest
 
 from forgejo_lxd_runner.client import (
     BackendClient,
+    BackendOperationError,
     BackendUnavailableError,
 )
 
@@ -204,3 +206,78 @@ def test_context_manager_closes_on_exit() -> None:
 
     with pytest.raises(RuntimeError):
         fresh.request("GET", "/1.0")
+
+
+# ---------------------------------------------------------------------------
+# launch_instance
+
+
+def test_launch_instance_creates_stopped_instance(client: BackendClient) -> None:
+    """launch_instance() with source.type=none yields a Stopped instance.
+
+    Exercises the same async round-trip as the raw run_operation() case,
+    but through the public semantic helper the server uses. Also verifies
+    the instance actually landed on the daemon by reading it back via
+    call() before cleanup.
+    """
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    config = {"name": name, "source": {"type": "none"}}
+
+    try:
+        result = client.launch_instance(config, timeout=30.0)
+        assert result.get("status_code") == 200
+
+        state = client.call("GET", f"/1.0/instances/{name}")
+        assert state.get("name") == name
+        # source.type=none produces an instance that exists but is not
+        # started — daemon reports "Stopped" in the sync record.
+        assert state.get("status") == "Stopped"
+    finally:
+        _delete_instance(client, name)
+
+
+def test_launch_instance_rejects_duplicate_name(client: BackendClient) -> None:
+    """A second launch with the same name is refused by the daemon.
+
+    The *shape* of the refusal varies between daemons and Incus versions:
+
+    * LXD rejects duplicates synchronously with ``409 Conflict``, so the
+      initial ``call()`` raises ``httpx.HTTPStatusError``.
+    * Older Incus versions raise the same conflict inside the async
+      operation, surfacing as ``BackendOperationError``.
+    * Recent Incus treats a duplicate ``source.type=none`` create as a
+      no-op and returns success; in that case we can't assert anything
+      about error mapping, so we skip.
+
+    What the test locks in is the invariant we actually care about: the
+    client propagates whichever error the daemon produces without
+    silently swallowing it.
+    """
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    config = {"name": name, "source": {"type": "none"}}
+
+    try:
+        client.launch_instance(config, timeout=30.0)
+        try:
+            client.launch_instance(config, timeout=30.0)
+        except (BackendOperationError, httpx.HTTPStatusError):
+            return  # expected: some form of "already exists"
+        pytest.skip("daemon accepts idempotent re-create; no error to assert on")
+    finally:
+        _delete_instance(client, name)
+
+
+def test_launch_instance_reports_http_error_on_bad_payload(
+    client: BackendClient,
+) -> None:
+    """A malformed request body is rejected synchronously as HTTP 4xx.
+
+    Missing the required ``source`` key is caught by the daemon before it
+    kicks off any async work, so we get an httpx.HTTPStatusError out of
+    the initial call() rather than a BackendOperationError from the wait.
+    Distinguishes the two error surfaces so callers can map them to
+    different gRPC status codes.
+    """
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    with pytest.raises(httpx.HTTPStatusError):
+        client.launch_instance({"name": name}, timeout=30.0)
