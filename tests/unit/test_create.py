@@ -69,3 +69,39 @@ def test_create_maps_http_failure_to_internal(
         service.Create(_req(), context)
     assert exc.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
     assert "job-1" not in service._envs  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ci", ["ci"]),
+        ("ci,gpu", ["ci", "gpu"]),
+        ("  ci ,  gpu  ", ["ci", "gpu"]),  # whitespace tolerated
+        ("ci,,gpu", ["ci", "gpu"]),  # empty entries dropped
+    ],
+)
+def test_create_passes_profiles(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    raw: str,
+    expected: list[str],
+) -> None:
+    service.Create(_req(backend_options={"profiles": raw}), context)
+
+    config = mock_backend_client.launch_instance.call_args.args[0]
+    assert config["profiles"] == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", ",,,", " , , "])
+def test_create_omits_profiles_when_effectively_empty(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    raw: str,
+) -> None:
+    """Empty / whitespace-only value → let LXD apply the ``default`` profile."""
+    service.Create(_req(backend_options={"profiles": raw}), context)
+
+    config = mock_backend_client.launch_instance.call_args.args[0]
+    assert "profiles" not in config
