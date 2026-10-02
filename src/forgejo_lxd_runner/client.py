@@ -351,6 +351,16 @@ class BackendClient:
             "POST", "/1.0/instances", project=project, timeout=timeout, json=config
         )
 
+    def get_instance_state(
+        self,
+        name: str,
+        *,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the ``/1.0/instances/<name>/state`` metadata dict."""
+
+        return self.call("GET", f"/1.0/instances/{name}/state", project=project)
+
 
 def _autodetect_socket() -> str:
     """Return the first existing socket from ``_DEFAULT_SOCKETS``.
