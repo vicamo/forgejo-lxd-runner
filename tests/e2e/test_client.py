@@ -9,6 +9,7 @@ assert autodetect landed on the intended daemon.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
@@ -497,5 +498,60 @@ def test_push_helpers_replay_directory_file_and_symlink(
         out, rc = _run(["/bin/sh", "-c", "readlink /root/forgejo-e2e/hello.lnk"])
         assert rc == 0
         assert out.strip() == b"/root/forgejo-e2e/hello"
+    finally:
+        _delete_instance(client, name)
+
+
+# ---------------------------------------------------------------------------
+# pull_file — round-trips against the push_* helpers on one instance, so the
+# image pull is paid once for both directions.
+
+
+def test_pull_file_round_trips_and_reports_404(client: BackendClient) -> None:
+    """pull_file returns the right (kind, data, mode) for each entry type.
+
+    Uses ``push_*`` to plant a known tree, then ``pull_file`` to fetch
+    each entry back. Verifies file bytes+mode, directory listing, and
+    symlink target — plus 404 propagation for a missing path.
+    """
+    source = _tiny_image_source(client)
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    payload = b"forgejo-e2e-pull-payload\n"
+    try:
+        client.launch_instance({"name": name, "source": source, "start": True}, timeout=180.0)
+        time.sleep(5)
+
+        client.push_directory(name, "/root/forgejo-e2e-pull")
+        client.push_file(name, "/root/forgejo-e2e-pull/hello", payload, mode=0o600)
+        client.push_symlink(
+            name, "/root/forgejo-e2e-pull/hello.lnk", "/root/forgejo-e2e-pull/hello"
+        )
+
+        # File: exact bytes + mode.
+        kind, data, mode = client.pull_file(name, "/root/forgejo-e2e-pull/hello")
+        assert kind == "file"
+        assert data == payload
+        assert mode == 0o600
+
+        # Directory: listing enumerates the two children we planted.
+        # Both daemons wrap sync responses in a metadata envelope; the
+        # raw file-body variant may either return that envelope or the
+        # bare list at top level. Handle either shape.
+        kind, data, _ = client.pull_file(name, "/root/forgejo-e2e-pull")
+        assert kind == "directory"
+        entries = json.loads(data.decode())
+        if isinstance(entries, dict):
+            entries = entries.get("metadata") or []
+        assert set(entries) >= {"hello", "hello.lnk"}
+
+        # Symlink: body is the target path.
+        kind, data, _ = client.pull_file(name, "/root/forgejo-e2e-pull/hello.lnk")
+        assert kind == "symlink"
+        assert data == b"/root/forgejo-e2e-pull/hello"
+
+        # Missing path: synchronous 404 -> httpx.HTTPStatusError.
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            client.pull_file(name, "/root/does-not-exist")
+        assert excinfo.value.response.status_code == 404
     finally:
         _delete_instance(client, name)
