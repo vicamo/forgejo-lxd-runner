@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
-from forgejo_lxd_runner.executor import HostExecutor
+from forgejo_lxd_runner.executor import ContainerExecutor, HostExecutor
 from forgejo_lxd_runner.proto.plugin.v1alpha import plugin_pb2
 from forgejo_lxd_runner.server import BackendPluginService, _Env
 
@@ -113,3 +113,72 @@ def test_exec_unknown_environment_aborts_not_found(
     with pytest.raises(aborted) as exc:
         _drain(service.Exec(req, context))
     assert exc.value.code == grpc.StatusCode.NOT_FOUND  # type: ignore[attr-defined]
+
+
+def test_exec_runs_in_the_job_container(
+    service: BackendPluginService, context: MagicMock, mock_backend_client: MagicMock
+) -> None:
+    service._envs["job-1"] = _Env(  # noqa: SLF001
+        instance_name="job-1",
+        executor=ContainerExecutor(
+            client=mock_backend_client,
+            instance="job-1",
+            image="node:20",
+            runtime="docker",
+            container="job-abc",
+        ),
+    )
+    mock_backend_client.exec_stream.return_value = _stream(("exit", 0))
+
+    _drain(
+        service.Exec(
+            plugin_pb2.ExecRequest(
+                environment_id="job-1",
+                command=["sh", "-c", "echo hi"],
+                env={"FOO": "bar"},
+                workdir="/work",
+            ),
+            context,
+        )
+    )
+
+    args, kwargs = mock_backend_client.exec_stream.call_args
+    assert args[1] == [
+        "docker",
+        "exec",
+        "--env",
+        "FOO=bar",
+        "--workdir",
+        "/work",
+        "job-abc",
+        "sh",
+        "-c",
+        "echo hi",
+    ]
+    # The outer exec runs the docker CLI on the instance, so the job's
+    # own env and workdir must not be applied to it.
+    assert kwargs["environment"] is None
+    assert kwargs["cwd"] is None
+
+
+def test_exec_without_a_container_runs_on_the_instance(
+    service: BackendPluginService, context: MagicMock, with_env: MagicMock
+) -> None:
+    with_env.exec_stream.return_value = _stream(("exit", 0))
+
+    _drain(
+        service.Exec(
+            plugin_pb2.ExecRequest(
+                environment_id="job-1",
+                command=["echo", "hi"],
+                env={"FOO": "bar"},
+                workdir="/work",
+            ),
+            context,
+        )
+    )
+
+    args, kwargs = with_env.exec_stream.call_args
+    assert args[1] == ["echo", "hi"]
+    assert kwargs["environment"] == {"FOO": "bar"}
+    assert kwargs["cwd"] == "/work"
