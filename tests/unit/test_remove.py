@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from forgejo_lxd_runner.client import BackendOperationError
-from forgejo_lxd_runner.executor import HostExecutor
+from forgejo_lxd_runner.executor import ContainerExecutor, HostExecutor
 from forgejo_lxd_runner.proto.plugin.v1alpha import plugin_pb2
 from forgejo_lxd_runner.server import BackendPluginService, _Env
 
@@ -88,3 +88,72 @@ def test_remove_maps_client_errors_to_internal(
         service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
 
     assert excinfo.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+def registered_with_container(
+    service: BackendPluginService, mock_backend_client: MagicMock
+) -> None:
+    """The env Create leaves behind for a job that asked for an image."""
+    service._envs["job-1"] = _Env(  # noqa: SLF001
+        instance_name="job-1",
+        executor=ContainerExecutor(
+            client=mock_backend_client,
+            instance="job-1",
+            image="node:20",
+            runtime="docker",
+            container="job-1-job",
+        ),
+    )
+
+
+def test_remove_tears_the_container_down_before_the_instance(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered_with_container: None,  # noqa: ARG001
+) -> None:
+    calls: list[str] = []
+    mock_backend_client.exec_capture.side_effect = lambda *a, **k: (
+        calls.append("container"),
+        (0, "", ""),
+    )[1]
+    mock_backend_client.remove_instance.side_effect = lambda *a, **k: calls.append("instance")
+
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    assert calls == ["container", "instance"]
+    assert mock_backend_client.exec_capture.call_args.args[1] == [
+        "docker",
+        "rm",
+        "--force",
+        "job-1-job",
+    ]
+    context.abort.assert_not_called()
+
+
+def test_remove_deletes_the_instance_when_the_container_will_not_die(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered_with_container: None,  # noqa: ARG001
+) -> None:
+    """The instance is the real resource; a stuck container must not keep it."""
+    mock_backend_client.exec_capture.side_effect = httpx.ConnectError("boom")
+
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    context.abort.assert_not_called()
+
+
+def test_remove_without_a_container_touches_only_the_instance(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered: None,  # noqa: ARG001
+) -> None:
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    mock_backend_client.exec_capture.assert_not_called()
+    mock_backend_client.remove_instance.assert_called_once_with("job-1")
