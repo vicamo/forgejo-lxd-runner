@@ -32,6 +32,7 @@ import grpc
 import pytest
 
 from forgejo_lxd_runner.client import BackendClient, BackendUnavailableError
+from forgejo_lxd_runner.executor import HostExecutor
 from forgejo_lxd_runner.proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 from forgejo_lxd_runner.server import BackendPluginService, _Env
 
@@ -126,7 +127,10 @@ def test_start_and_remove_against_real_daemon(
     # a booted instance rather than booting one.
     real_client.launch_instance({"name": env_id, "source": source, "start": True}, timeout=180.0)
     with plugin_service._lock:
-        plugin_service._envs[env_id] = _Env(instance_name=env_id)
+        plugin_service._envs[env_id] = _Env(
+            instance_name=env_id,
+            executor=HostExecutor(client=real_client, instance=env_id),
+        )
 
     try:
         frames = list(
@@ -187,7 +191,10 @@ def test_remove_after_manual_delete_over_grpc(
     """
     env_id = f"forgejo-e2e-rpc-ghost-{uuid.uuid4().hex[:8]}"
     with plugin_service._lock:
-        plugin_service._envs[env_id] = _Env(instance_name=env_id)
+        plugin_service._envs[env_id] = _Env(
+            instance_name=env_id,
+            executor=HostExecutor(client=real_client, instance=env_id),
+        )
 
     plugin_stub.Remove(
         plugin_pb2.RemoveRequest(environment_id=env_id),
