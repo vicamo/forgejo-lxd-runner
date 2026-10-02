@@ -497,6 +497,57 @@ class BackendClient:
         )
 
     # ------------------------------------------------------------------
+    # Profiles
+
+    def create_profile(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        config: dict[str, str] | None = None,
+        devices: dict[str, dict[str, str]] | None = None,
+        project: str | None = None,
+    ) -> None:
+        """Create profile ``name`` on the daemon.
+
+        ``POST /1.0/profiles`` is a synchronous endpoint on both LXD and
+        Incus — no operation to wait on — so this goes through
+        :meth:`call` rather than :meth:`run_operation`. Only the keys the
+        caller supplies are sent; omitted ones are left to the daemon's
+        own defaults rather than synthesised here. A duplicate name
+        surfaces as ``httpx.HTTPStatusError`` (409) for the caller to map.
+        """
+
+        payload: dict[str, Any] = {"name": name}
+        if description is not None:
+            payload["description"] = description
+        if config is not None:
+            payload["config"] = config
+        if devices is not None:
+            payload["devices"] = devices
+        self.call("POST", "/1.0/profiles", project=project, json=payload)
+
+    def remove_profile(
+        self,
+        name: str,
+        *,
+        project: str | None = None,
+    ) -> None:
+        """Remove profile ``name``, tolerating "already gone".
+
+        Mirrors :meth:`remove_instance`'s contract: the post-condition is
+        ``profile <name> does not exist in <project>``, which a 404
+        already satisfies. Every other status still raises. Note the
+        daemon refuses to delete a profile that instances still
+        reference — that surfaces as a 400 and is the caller's problem.
+        """
+
+        resp = self.request("DELETE", f"/1.0/profiles/{name}", project=project)
+        if resp.status_code == 404:
+            return
+        resp.raise_for_status()
+
+    # ------------------------------------------------------------------
     # Exec streaming
 
     def exec_stream(
