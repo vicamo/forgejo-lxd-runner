@@ -26,6 +26,9 @@ from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 
 log = logging.getLogger(__name__)
 
+# LXD / Incus instance status codes we care about.
+_STATUS_RUNNING = 103
+
 
 class _Env:
     """Per-environment state tracked by the plugin."""
@@ -60,6 +63,18 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         self._client = BackendClient()
         self._envs: dict[str, _Env] = {}
         self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _lookup(self, context: grpc.ServicerContext, env_id: str) -> _Env:
+        with self._lock:
+            env = self._envs.get(env_id)
+        if env is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, f"unknown environment {env_id!r}")
+            raise AssertionError("unreachable")  # for type checkers
+        return env
 
     # ------------------------------------------------------------------
     # BackendPlugin RPCs
@@ -123,9 +138,31 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         )
 
     def Start(  # noqa: N802
-        self, request: plugin_pb2.StartRequest, context: grpc.ServicerContext
+        self,
+        request: plugin_pb2.StartRequest,
+        context: grpc.ServicerContext,
     ) -> Iterator[plugin_pb2.StartOutput]:
-        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Start not implemented")
+        env = self._lookup(context, request.environment_id)
+        name = env.instance_name
+        # Create launches the instance with ``start: true``, so by the
+        # time Forgejo calls Start there is nothing left to bring up —
+        # this is the ``docker start`` of an already-running container.
+        # All that remains is to confirm the environment is still usable
+        # and fail loudly if it is not, rather than letting the first
+        # Exec report a confusing error.
+        try:
+            state = self._client.get_instance_state(name)
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"lxd start: {exc}")
+        if state.get("status_code") != _STATUS_RUNNING:
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"instance {name!r} is not running (status {state.get('status')!r})",
+            )
+
+        log.info("started environment %s", request.environment_id)
+        # No image_env discovery yet.
+        yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
 
     def Exec(  # noqa: N802
         self, request: plugin_pb2.ExecRequest, context: grpc.ServicerContext
