@@ -36,6 +36,8 @@ dev = [
     "grpc-stubs>=1.53",
     "types-protobuf>=4.24",
     "nox>=2024.4.15",
+    "pyyaml>=6.0",
+    "types-pyyaml>=6.0",
 ]
 
 [project.scripts]

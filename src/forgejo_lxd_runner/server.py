@@ -144,6 +144,15 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             "source": {"type": "image", "alias": image},
             "start": True,
         }
+        # ``profiles`` backend option: comma-separated list of LXD profile
+        # names to apply. Absent (or empty after parsing) -> LXD applies the
+        # ``default`` profile, which is what most single-project setups want.
+        # Explicit ``profiles: ""`` is treated as absence rather than "no
+        # profiles" (an empty list disables the root disk and network).
+        profiles_raw = request.backend_options.get("profiles", "")
+        profiles = [p.strip() for p in profiles_raw.split(",") if p.strip()]
+        if profiles:
+            config["profiles"] = profiles
         try:
             self._client.launch_instance(config)
         except (httpx.HTTPError, BackendOperationError) as exc:
