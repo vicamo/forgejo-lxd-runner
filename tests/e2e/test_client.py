@@ -693,3 +693,111 @@ def test_remove_instance_is_idempotent_on_missing_name(client: BackendClient) ->
     name = f"forgejo-e2e-ghost-{uuid.uuid4().hex[:10]}"
     # Must not raise; must not return anything.
     assert client.remove_instance(name) is None
+
+
+# ---------------------------------------------------------------------------
+# create_profile / remove_profile
+
+
+def test_create_profile_registers_config_and_devices(client: BackendClient) -> None:
+    """A created profile reads back with exactly the fields we sent."""
+    name = f"forgejo-e2e-profile-{uuid.uuid4().hex[:10]}"
+
+    try:
+        client.create_profile(
+            name,
+            description="forgejo-lxd-runner e2e",
+            config={"security.nesting": "true"},
+            devices={"scratch": {"type": "disk", "path": "/scratch", "source": "/tmp"}},
+        )
+
+        meta = client.call("GET", f"/1.0/profiles/{name}")
+        assert meta.get("name") == name
+        assert meta.get("description") == "forgejo-lxd-runner e2e"
+        assert (meta.get("config") or {}).get("security.nesting") == "true"
+        assert "scratch" in (meta.get("devices") or {})
+    finally:
+        with contextlib.suppress(Exception):
+            client.remove_profile(name)
+
+
+def test_create_profile_with_name_only_leaves_daemon_defaults(
+    client: BackendClient,
+) -> None:
+    """Omitted fields are the daemon's call — we send nothing for them."""
+    name = f"forgejo-e2e-profile-{uuid.uuid4().hex[:10]}"
+
+    try:
+        client.create_profile(name)
+
+        meta = client.call("GET", f"/1.0/profiles/{name}")
+        assert meta.get("name") == name
+        # Daemon materialises empty containers rather than nulls.
+        assert not (meta.get("config") or {})
+        assert not (meta.get("devices") or {})
+    finally:
+        with contextlib.suppress(Exception):
+            client.remove_profile(name)
+
+
+def test_create_profile_rejects_duplicate_name(client: BackendClient) -> None:
+    """A second create with the same name is refused by the daemon.
+
+    The status code varies by daemon and version — LXD reports the
+    conflict as ``500`` rather than ``409`` — so assert only that the
+    refusal surfaces as an HTTP error, not on a particular code.
+    """
+    name = f"forgejo-e2e-profile-{uuid.uuid4().hex[:10]}"
+
+    try:
+        client.create_profile(name)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.create_profile(name)
+    finally:
+        with contextlib.suppress(Exception):
+            client.remove_profile(name)
+
+
+def test_remove_profile_deletes_an_existing_profile(client: BackendClient) -> None:
+    name = f"forgejo-e2e-profile-{uuid.uuid4().hex[:10]}"
+    client.create_profile(name, config={"security.nesting": "true"})
+
+    client.remove_profile(name)
+
+    resp = client.request("GET", f"/1.0/profiles/{name}")
+    assert resp.status_code == 404
+
+
+def test_remove_profile_is_idempotent_on_missing_name(client: BackendClient) -> None:
+    """Removing a profile that never existed is a no-op, not a 404 raise."""
+    name = f"forgejo-e2e-profile-ghost-{uuid.uuid4().hex[:10]}"
+    assert client.remove_profile(name) is None
+
+
+def test_remove_profile_raises_while_an_instance_references_it(
+    client: BackendClient,
+) -> None:
+    """The daemon refuses to delete an in-use profile; we surface that."""
+    profile = f"forgejo-e2e-profile-{uuid.uuid4().hex[:10]}"
+    instance = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    client.create_profile(profile, config={"security.nesting": "true"})
+
+    try:
+        # ``default`` carries the root disk; ours only adds config, so the
+        # instance needs both for the daemon to accept the create.
+        client.launch_instance(
+            {
+                "name": instance,
+                "source": {"type": "none"},
+                "profiles": ["default", profile],
+            },
+            timeout=30.0,
+        )
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.remove_profile(profile)
+    finally:
+        _delete_instance(client, instance)
+        with contextlib.suppress(Exception):
+            client.remove_profile(profile)
