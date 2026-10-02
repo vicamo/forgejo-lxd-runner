@@ -146,7 +146,24 @@ def test_run_operation_creates_and_deletes_empty_instance(
 
 
 def _delete_instance(client: BackendClient, name: str) -> None:
-    """Best-effort teardown for an instance created during a test."""
+    """Best-effort teardown for an instance created during a test.
+
+    The daemon refuses ``DELETE`` on a running instance with HTTP 400
+    ("Instance is running") — and neither ``?force=1`` nor ``{"force":
+    true}`` overrides that, so a stop has to come first. Both steps go
+    through the raw ``request()`` primitive rather than the semantic
+    wrappers: teardown must tolerate an instance that is already gone,
+    half-created, or never started, which is the opposite of the
+    strict-contract behaviour those wrappers exist to provide.
+    """
+    resp = client.request(
+        "PUT", f"/1.0/instances/{name}/state", json={"action": "stop", "force": True}
+    )
+    if resp.status_code == 202:
+        op = resp.json().get("metadata") or {}
+        if op.get("id"):
+            client.operation_wait(op, timeout=30.0)
+
     resp = client.request("DELETE", f"/1.0/instances/{name}")
     if resp.status_code == 202:
         op = resp.json().get("metadata") or {}
@@ -281,3 +298,88 @@ def test_launch_instance_reports_http_error_on_bad_payload(
     name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
     with pytest.raises(httpx.HTTPStatusError):
         client.launch_instance({"name": name}, timeout=30.0)
+
+
+# ---------------------------------------------------------------------------
+# get_instance_state
+
+
+# Two daemon-appropriate simplestreams sources. Canonical LXD 5.21 no
+# longer pulls from images.linuxcontainers.org (it silently completes
+# the create operation without provisioning the instance), so LXD uses
+# Canonical's own ubuntu-minimal remote; Incus keeps the community
+# images.linuxcontainers.org remote. Both are ~30-40 MB and boot fast.
+_TINY_IMAGE_SOURCES = {
+    "lxd": {
+        "type": "image",
+        "protocol": "simplestreams",
+        "server": "https://cloud-images.ubuntu.com/minimal/releases/",
+        "alias": "24.04",
+    },
+    "incus": {
+        "type": "image",
+        "protocol": "simplestreams",
+        "server": "https://images.linuxcontainers.org",
+        "alias": "alpine/edge",
+    },
+}
+
+
+def _tiny_image_source(client: BackendClient) -> dict[str, str]:
+    """Pick a daemon-appropriate image source from ``client.flavor``.
+
+    ``client.flavor`` is derived from the daemon's own ``/1.0``
+    self-description, so it stays accurate even when the socket path
+    is customised. Falls back to a skip when the daemon reports an
+    unknown flavour.
+    """
+    try:
+        return _TINY_IMAGE_SOURCES[client.flavor]
+    except KeyError:
+        pytest.skip(f"cannot pick a tiny image source for flavor {client.flavor!r}")
+
+
+def test_get_instance_state_reports_running_after_launch(client: BackendClient) -> None:
+    """``start: true`` on the create payload yields a Running instance.
+
+    Pins the status_code enum value the Start RPC's readiness check keys
+    off (103=Running), and doubles as the observable proof that the
+    daemon really does create *and* boot in a single operation — the
+    assumption Create depends on.
+
+    A bootable image is required: with ``source.type=none`` the daemon
+    accepts ``start: true`` but the instance has no rootfs and falls
+    straight back to Stopped (102).
+    """
+    source = _tiny_image_source(client)
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    config = {"name": name, "source": source, "start": True}
+
+    try:
+        # First-time image pull can take a while; give the daemon room.
+        client.launch_instance(config, timeout=180.0)
+
+        # Canonical LXD 5.21 has been observed silently completing the
+        # create operation as "success" without provisioning anything
+        # when the image remote is unreachable. Verify the instance
+        # actually landed before touching /state, so that failure mode
+        # points the finger at launch_instance instead of surfacing as
+        # a mysterious 404 here.
+        record = client.call("GET", f"/1.0/instances/{name}")
+        assert record.get("name") == name, (
+            f"launch_instance reported success but instance {name!r} is absent from the daemon"
+        )
+
+        state = client.get_instance_state(name)
+        assert state.get("status") == "Running"
+        assert state.get("status_code") == 103
+    finally:
+        _delete_instance(client, name)
+
+
+def test_get_instance_state_raises_for_unknown_name(client: BackendClient) -> None:
+    """Unknown instance names yield HTTP 404 → httpx.HTTPStatusError."""
+    name = f"forgejo-e2e-missing-{uuid.uuid4().hex[:10]}"
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        client.get_instance_state(name)
+    assert excinfo.value.response.status_code == 404
