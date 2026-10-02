@@ -16,13 +16,17 @@ import httpx
 import pytest
 
 from forgejo_lxd_runner.client import BackendOperationError
+from forgejo_lxd_runner.executor import HostExecutor
 from forgejo_lxd_runner.proto.plugin.v1alpha import plugin_pb2
 from forgejo_lxd_runner.server import BackendPluginService, _Env
 
 
 @pytest.fixture
-def registered(service: BackendPluginService) -> None:
-    service._envs["job-1"] = _Env(instance_name="job-1")  # noqa: SLF001
+def registered(service: BackendPluginService, mock_backend_client: MagicMock) -> None:
+    service._envs["job-1"] = _Env(
+        instance_name="job-1",
+        executor=HostExecutor(client=mock_backend_client, instance="job-1"),
+    )  # noqa: SLF001
 
 
 def test_remove_unknown_env_is_noop(

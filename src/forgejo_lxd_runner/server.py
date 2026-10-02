@@ -28,6 +28,7 @@ import grpc
 import httpx
 
 from .client import BackendClient, BackendOperationError
+from .executor import Executor, ExecutorError, mount_specs, resolve
 from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,17 @@ _STATUS_RUNNING = 103
 
 # CopyOut yields the tar body in fixed-size gRPC chunks.
 _COPY_CHUNK_SIZE = 256 * 1024
+
+# The filesystem layout promised to Forgejo in ``CreateResponse``.
+# TODO: discover os/arch and expose a knob for these.
+_ROOT_PATH = "/root/actions-runner"
+_ACT_PATH = "/root/actions-runner/act"
+_TOOL_CACHE_PATH = "/opt/hostedtoolcache"
+_TEMP_PATH = "/tmp"
+
+#: Bind-mounted into a job container at identical paths, so the layout
+#: above stays true inside it and CopyIn/CopyOut need no translation.
+_JOB_CONTAINER_MOUNTS = (_ROOT_PATH, _TOOL_CACHE_PATH, _TEMP_PATH)
 
 
 class _Env:
@@ -62,10 +74,22 @@ class _Env:
     respond by issuing ``Remove`` for that ``environment_id``.
     """
 
-    __slots__ = ("instance_name",)
+    __slots__ = ("executor", "instance_name", "job_image")
 
-    def __init__(self, instance_name: str) -> None:
+    def __init__(self, instance_name: str, executor: Executor, job_image: str = "") -> None:
         self.instance_name = instance_name
+        #: The workflow's ``container.image``, empty when the job has no
+        #: ``container:`` block — the common case. When set, the job runs
+        #: inside this image on the instance rather than on the instance
+        #: directly.
+        self.job_image = job_image
+        #: Where this job's commands run, decided once by ``resolve()``
+        #: before the environment is recorded and never reassigned. An
+        #: environment with no executor is not a state worth modelling:
+        #: it could only exist between construction and the fixup that
+        #: replaced it, and anything reading it there would silently run
+        #: the job in the wrong place.
+        self.executor = executor
 
 
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
@@ -104,6 +128,20 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(grpc.StatusCode.NOT_FOUND, f"unknown environment {env_id!r}")
             raise AssertionError("unreachable")  # for type checkers
         return env
+
+    def _discard(self, name: str) -> None:
+        """Delete an instance Create is about to abandon.
+
+        Best-effort on purpose: the caller is already failing and the
+        gRPC error it is about to raise describes the real problem.
+        Letting a cleanup error replace it would hide the cause, so a
+        failure here is logged and swallowed -- an instance that outlives
+        a failed Create is a smaller problem than an unreportable one.
+        """
+        try:
+            self._client.remove_instance(name)
+        except (httpx.HTTPError, BackendOperationError):
+            log.exception("failed to remove instance %s after a failed Create", name)
 
     # ------------------------------------------------------------------
     # BackendPlugin RPCs
@@ -159,18 +197,49 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(grpc.StatusCode.INTERNAL, f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc
 
-        with self._lock:
-            self._envs[name] = _Env(instance_name=name)
+        # The instance is running by now, so the runtime inside it can
+        # answer a probe and the job container can be created. Anything
+        # that fails from here on has to delete the instance first:
+        # Create never returned an environment_id, so Forgejo does not
+        # know there is anything to Remove, and the instance would be
+        # left behind for an operator to find.
+        try:
+            executor = resolve(self._client, name, request.image)
+            executor.create(
+                f"{name}-job",
+                workdir=_ROOT_PATH,
+                mounts=mount_specs(list(_JOB_CONTAINER_MOUNTS)),
+            )
+        except ExecutorError as exc:
+            self._discard(name)
+            # A missing runtime is the operator's to fix in the Forgejo
+            # config; an unresolvable image is the workflow's.
+            code = (
+                grpc.StatusCode.FAILED_PRECONDITION
+                if exc.precondition
+                else grpc.StatusCode.INVALID_ARGUMENT
+            )
+            context.abort(code, str(exc))
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            self._discard(name)
+            context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
 
-        log.info("created environment %s from image %s", name, image)
+        with self._lock:
+            self._envs[name] = _Env(
+                instance_name=name,
+                executor=executor,
+                job_image=request.image,
+            )
+
+        log.info("created environment %s from image %s on %s", name, image, executor)
 
         # TODO: discover os/arch and expose a knob for the paths.
         return plugin_pb2.CreateResponse(
             environment_id=name,
-            root_path="/root/actions-runner",
-            act_path="/root/actions-runner/act",
-            tool_cache_path="/opt/hostedtoolcache",
-            temp_path="/tmp",
+            root_path=_ROOT_PATH,
+            act_path=_ACT_PATH,
+            tool_cache_path=_TOOL_CACHE_PATH,
+            temp_path=_TEMP_PATH,
             os="Linux",
             arch="X64",
         )
@@ -198,7 +267,18 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 f"instance {name!r} is not running (status {state.get('status')!r})",
             )
 
-        log.info("started environment %s", request.environment_id)
+        # The job container was created by Create; all that is left is to
+        # start it. Unlike the instance, it is not started on creation --
+        # `docker create` leaves it stopped, which is exactly the split
+        # this RPC pair exists to express.
+        try:
+            env.executor.start()
+        except ExecutorError as exc:
+            context.abort(grpc.StatusCode.INTERNAL, str(exc))
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
+
+        log.info("started environment %s on %s", request.environment_id, env.executor)
         # No image_env discovery yet.
         yield plugin_pb2.StartOutput(start_complete=plugin_pb2.StartComplete())
 
