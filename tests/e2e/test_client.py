@@ -558,3 +558,140 @@ def test_pull_file_round_trips_and_reports_404(client: BackendClient) -> None:
         assert excinfo.value.response.status_code == 404
     finally:
         _delete_instance(client, name)
+
+
+# ---------------------------------------------------------------------------
+# set_instance_state — explicit transitions, now that remove_instance needs it
+
+
+def test_set_instance_state_completes_start_and_stop(
+    client: BackendClient,
+) -> None:
+    """set_instance_state drives a real instance through start and stop.
+
+    Launches *without* ``start: true`` precisely so there is a Stopped
+    instance to transition — this is the one test that cares about the
+    transitions themselves rather than the end state.
+
+    Uses a tiny bootable image so the assertions mean something: with
+    ``source.type=none`` the daemon accepts ``start`` but the instance
+    immediately falls back to Stopped. Also pins the status_code enum
+    values remove_instance keys off (102=Stopped, 103=Running).
+
+    ``stop`` uses ``force=True`` — a graceful shutdown takes seconds
+    even on a tiny image while force is instantaneous, and we're not
+    testing guest ACPI behaviour here.
+    """
+    source = _tiny_image_source(client)
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    try:
+        # First-time image pull can take a while; give the daemon room.
+        client.launch_instance({"name": name, "source": source}, timeout=180.0)
+
+        # Canonical LXD 5.21 has been observed silently completing the
+        # create operation as "success" without provisioning anything
+        # when the image remote is unreachable. Verify the instance
+        # actually landed before touching /state, so that failure mode
+        # points the finger at launch_instance instead of surfacing as
+        # a mysterious 404 later.
+        record = client.call("GET", f"/1.0/instances/{name}")
+        assert record.get("name") == name, (
+            f"launch_instance reported success but instance {name!r} is absent from the daemon"
+        )
+
+        # Fresh instance sits Stopped.
+        pre = client.get_instance_state(name)
+        assert pre.get("status") == "Stopped"
+        assert pre.get("status_code") == 102
+
+        client.set_instance_state(name, "start", timeout=60.0)
+        running = client.get_instance_state(name)
+        assert running.get("status") == "Running"
+        assert running.get("status_code") == 103
+
+        client.set_instance_state(name, "stop", force=True, timeout=30.0)
+        stopped = client.get_instance_state(name)
+        assert stopped.get("status") == "Stopped"
+        assert stopped.get("status_code") == 102
+    finally:
+        _delete_instance(client, name)
+
+
+# ---------------------------------------------------------------------------
+# run_operation(missing_ok=True) — teardown-race idempotence
+
+
+def test_run_operation_missing_ok_swallows_404(client: BackendClient) -> None:
+    """DELETE on an instance that never existed returns None, not an error.
+
+    The teardown races remove_instance handles rely on this branch: an
+    instance that vanished under the plugin (concurrent delete,
+    out-of-band cleanup) must not turn teardown into an error.
+    """
+    name = f"forgejo-e2e-ghost-{uuid.uuid4().hex[:10]}"
+    result = client.run_operation("DELETE", f"/1.0/instances/{name}", missing_ok=True)
+    assert result is None
+
+
+def test_run_operation_missing_ok_still_deletes_existing(client: BackendClient) -> None:
+    """missing_ok=True on a live instance still performs the delete.
+
+    Locks in that the flag is a "404 -> success" shortcut, not a
+    "skip the write" no-op — the resource is gone afterwards.
+    """
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    client.launch_instance({"name": name, "source": {"type": "none"}}, timeout=30.0)
+    result = client.run_operation("DELETE", f"/1.0/instances/{name}", missing_ok=True)
+    assert result is not None
+    # Instance is really gone; a follow-up read 404s.
+    resp = client.request("GET", f"/1.0/instances/{name}")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# remove_instance — end-to-end teardown against a real daemon
+
+
+def test_remove_instance_deletes_stopped_instance(client: BackendClient) -> None:
+    """A stopped instance is deleted in one call; no stop step needed."""
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    client.launch_instance({"name": name, "source": {"type": "none"}}, timeout=30.0)
+
+    client.remove_instance(name)
+
+    resp = client.request("GET", f"/1.0/instances/{name}")
+    assert resp.status_code == 404
+
+
+def test_remove_instance_stops_running_instance_then_deletes(
+    client: BackendClient,
+) -> None:
+    """A running instance is force-stopped, then deleted.
+
+    This is the path that matters for teardown: the daemon refuses
+    DELETE on a running instance, so remove_instance has to notice the
+    state and stop first.
+    """
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    source = _tiny_image_source(client)
+    client.launch_instance({"name": name, "source": source, "start": True}, timeout=180.0)
+    try:
+        assert client.get_instance_state(name).get("status") == "Running"
+
+        client.remove_instance(name, timeout=60.0)
+
+        resp = client.request("GET", f"/1.0/instances/{name}")
+        assert resp.status_code == 404
+    except BaseException:
+        # Best-effort cleanup if the assertions above fail before the
+        # remove_instance call actually lands.
+        with contextlib.suppress(Exception):
+            client.run_operation("DELETE", f"/1.0/instances/{name}", missing_ok=True, timeout=60.0)
+        raise
+
+
+def test_remove_instance_is_idempotent_on_missing_name(client: BackendClient) -> None:
+    """Calling remove_instance on a name that never existed is a no-op."""
+    name = f"forgejo-e2e-ghost-{uuid.uuid4().hex[:10]}"
+    # Must not raise; must not return anything.
+    assert client.remove_instance(name) is None

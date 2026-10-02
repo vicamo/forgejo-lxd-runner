@@ -25,7 +25,7 @@ import queue
 import threading
 import time
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 import websockets
@@ -75,6 +75,11 @@ _OP_POLL_READ_MARGIN = 15
 # the request rate without adding latency when the long-poll window is
 # actually honoured.
 _OP_POLL_MIN_INTERVAL = 1.0
+
+# LXD/Incus instance state ``status_code`` values. Mirrored from the daemon's
+# ``shared.StatusCodeStopped`` constant; documented at
+# https://documentation.ubuntu.com/lxd/latest/rest-api/#instances .
+_INSTANCE_STATUS_STOPPED = 102
 
 
 class BackendClient:
@@ -312,6 +317,30 @@ class BackendClient:
             if idle > 0:
                 time.sleep(idle)
 
+    @overload
+    def run_operation(
+        self,
+        method: str,
+        path: str,
+        *,
+        project: str | None = ...,
+        timeout: float | None = ...,
+        missing_ok: Literal[False] = ...,
+        **kwargs: Any,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def run_operation(
+        self,
+        method: str,
+        path: str,
+        *,
+        project: str | None = ...,
+        timeout: float | None = ...,
+        missing_ok: Literal[True],
+        **kwargs: Any,
+    ) -> dict[str, Any] | None: ...
+
     def run_operation(
         self,
         method: str,
@@ -319,8 +348,9 @@ class BackendClient:
         *,
         project: str | None = None,
         timeout: float | None = None,
+        missing_ok: bool = False,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Kick off an async operation and wait for it to finish.
 
         Every write endpoint on LXD/Incus (instance create/start/stop/
@@ -328,9 +358,23 @@ class BackendClient:
         operation record. This helper posts the request via :meth:`call`
         and then blocks on :meth:`operation_wait` until the operation
         completes (or times out). Returns the final operation metadata.
+
+        When ``missing_ok=True``, a ``404 Not Found`` on the initial
+        request is treated as success and ``None`` is returned — the
+        resource is already gone, so the operation is a no-op.
+        Symmetric with :func:`os.makedirs` / :func:`shutil.rmtree`'s
+        ``ignore_errors`` idiom; useful for teardown paths that race
+        with concurrent deletes.
         """
 
-        operation = self.call(method, path, project=project, **kwargs)
+        if missing_ok:
+            resp = self.request(method, path, project=project, **kwargs)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            operation = resp.json().get("metadata") or {}
+        else:
+            operation = self.call(method, path, project=project, **kwargs)
         return self.operation_wait(operation, project=project, timeout=timeout)
 
     # ------------------------------------------------------------------
@@ -366,6 +410,91 @@ class BackendClient:
         """Return the ``/1.0/instances/<name>/state`` metadata dict."""
 
         return self.call("GET", f"/1.0/instances/{name}/state", project=project)
+
+    def set_instance_state(
+        self,
+        name: str,
+        action: str,
+        *,
+        project: str | None = None,
+        timeout: float | None = None,
+        force: bool = False,
+        stateful: bool = False,
+    ) -> dict[str, Any]:
+        """Drive an instance through a state transition and wait for it.
+
+        Wraps ``PUT /1.0/instances/<name>/state`` — the endpoint LXD /
+        Incus expose for ``start`` / ``stop`` / ``restart`` / ``freeze``
+        / ``unfreeze``. The daemon replies with a 202 + operation which
+        this helper blocks on via :meth:`run_operation`. ``timeout`` on
+        the payload stays at ``-1`` (no daemon-side deadline); the
+        keyword ``timeout`` argument is the client-side wait budget.
+        """
+
+        payload: dict[str, Any] = {"action": action, "timeout": -1}
+        if force:
+            payload["force"] = True
+        if stateful:
+            payload["stateful"] = True
+        return self.run_operation(
+            "PUT",
+            f"/1.0/instances/{name}/state",
+            project=project,
+            timeout=timeout,
+            json=payload,
+        )
+
+    def remove_instance(
+        self,
+        name: str,
+        *,
+        project: str | None = None,
+        force: bool = True,
+        timeout: float | None = None,
+    ) -> None:
+        """Remove an instance, tolerating "already gone" at every step.
+
+        Deletion is a three-step dance: read state, stop if the instance
+        is not already stopped, then delete. LXD/Incus refuse ``DELETE``
+        on a running instance, so the stop step cannot be skipped
+        blindly. Any of the three requests can race with a concurrent
+        delete (operator ``lxc delete``, another Remove RPC, an
+        ``ephemeral`` self-destruct on stop) — every 404 along the way
+        is treated as success because the caller's post-condition
+        (``instance <name> does not exist in <project>``) already holds.
+
+        ``force=True`` (the default) matches this plugin's teardown
+        semantics: kill the instance rather than wait for a clean
+        shutdown. Pass ``force=False`` for a graceful stop.
+
+        Unlike :meth:`set_instance_state`, whose contract is "make the
+        state change happen" and which therefore surfaces 404 as an
+        error, this method's contract is "the instance is gone when I
+        return"; 404 satisfies that contract.
+        """
+
+        try:
+            state = self.get_instance_state(name, project=project)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            return
+        if state.get("status_code") != _INSTANCE_STATUS_STOPPED:
+            try:
+                self.set_instance_state(name, "stop", project=project, timeout=timeout, force=force)
+            except httpx.HTTPStatusError as exc:
+                # Instance vanished between the state probe and the stop
+                # request — post-condition already satisfied.
+                if exc.response.status_code != 404:
+                    raise
+                return
+        self.run_operation(
+            "DELETE",
+            f"/1.0/instances/{name}",
+            project=project,
+            timeout=timeout,
+            missing_ok=True,
+        )
 
     # ------------------------------------------------------------------
     # Exec streaming
