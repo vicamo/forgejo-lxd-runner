@@ -142,6 +142,7 @@ def test_host_executor_is_inert() -> None:
     executor.create("ignored", workdir="/work", mounts=[])
     executor.start()
     executor.cleanup()
+    assert executor.wrap(["echo", "hi"]) == (["echo", "hi"], None, None, None)
     # Critically: it never touches the instance.
     assert client.calls == []
 
@@ -260,3 +261,81 @@ def test_mount_specs_maps_paths_onto_themselves() -> None:
 def test_mount_specs_does_not_shell_quote() -> None:
     """These are argv entries; quoting would become part of the path."""
     assert mount_specs(["/a b"]) == ["/a b:/a b"]
+
+
+def test_wrap_execs_into_the_container() -> None:
+    client = make_client()
+    executor = ContainerExecutor(
+        client=client,
+        instance=INSTANCE,
+        image="node:20",
+        runtime="podman",
+        container="job-abc",
+    )
+
+    assert executor.wrap(["sh", "-c", "echo hi"]) == (
+        ["podman", "exec", "job-abc", "sh", "-c", "echo hi"],
+        None,
+        None,
+        None,
+    )
+
+
+def test_wrap_moves_env_user_and_cwd_onto_the_container() -> None:
+    client = make_client()
+    executor = ContainerExecutor(
+        client=client,
+        instance=INSTANCE,
+        image="node:20",
+        runtime="docker",
+        container="job-abc",
+    )
+
+    argv, environment, user, cwd = executor.wrap(
+        ["env"],
+        environment={"FOO": "bar"},
+        user=1000,
+        cwd="/work",
+    )
+
+    assert argv == [
+        "docker",
+        "exec",
+        "--env",
+        "FOO=bar",
+        "--user",
+        "1000",
+        "--workdir",
+        "/work",
+        "job-abc",
+        "env",
+    ]
+    # Handed to the container, so nothing is left for the outer exec:
+    # applied there they would configure the docker CLI, not the job.
+    assert (environment, user, cwd) == (None, None, None)
+
+
+def test_wrap_passes_host_env_user_and_cwd_straight_through() -> None:
+    executor = HostExecutor(client=make_client(), instance=INSTANCE)
+
+    assert executor.wrap(["env"], environment={"FOO": "bar"}, user=1000, cwd="/work") == (
+        ["env"],
+        {"FOO": "bar"},
+        1000,
+        "/work",
+    )
+
+
+def test_wrap_omits_flags_it_was_not_given() -> None:
+    executor = ContainerExecutor(
+        client=make_client(),
+        instance=INSTANCE,
+        image="node:20",
+        runtime="docker",
+        container="job-abc",
+    )
+
+    # A zero UID is a real user (root) and must not be dropped as falsy.
+    argv, _, _, _ = executor.wrap(["id"], user=0)
+
+    assert argv == ["docker", "exec", "--user", "0", "job-abc", "id"]

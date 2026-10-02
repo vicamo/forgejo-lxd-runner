@@ -87,6 +87,22 @@ class HostExecutor:
     def start(self) -> None:
         """Nothing to start; the instance is already running."""
 
+    def wrap(
+        self,
+        command: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        user: int | None = None,
+        cwd: str | None = None,
+    ) -> tuple[list[str], dict[str, str] | None, int | None, str | None]:
+        """Run ``command`` as given, directly in the instance.
+
+        The instance exec already applies ``environment``, ``user`` and
+        ``cwd``, so they are handed back untouched for the caller to
+        pass on.
+        """
+        return command, environment, user, cwd
+
     def cleanup(self) -> None:
         """Nothing to remove; the instance outlives this object."""
 
@@ -151,6 +167,34 @@ class ContainerExecutor:
             raise ExecutorError(
                 f"{self.runtime} start {self.container!r} failed: {self._last_line(out, err)}"
             )
+
+    def wrap(
+        self,
+        command: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        user: int | None = None,
+        cwd: str | None = None,
+    ) -> tuple[list[str], dict[str, str] | None, int | None, str | None]:
+        """Return the argv that runs ``command`` inside the container.
+
+        ``environment``, ``user`` and ``cwd`` become ``--env``,
+        ``--user`` and ``--workdir`` flags and are returned as ``None``:
+        applied to the outer instance exec they would configure the
+        ``<runtime>`` process itself, leaving the job unaffected.
+
+        Built rather than executed so the caller can stream it through
+        ``exec_stream``: Exec is a streaming RPC and must not buffer a
+        step's output.
+        """
+        args = [self.runtime, "exec"]
+        for key, value in (environment or {}).items():
+            args += ["--env", f"{key}={value}"]
+        if user is not None:
+            args += ["--user", str(user)]
+        if cwd:
+            args += ["--workdir", cwd]
+        return [*args, self.container, *command], None, None, None
 
     def cleanup(self) -> None:
         """Force-remove the container; already gone counts as success."""
