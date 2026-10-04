@@ -89,13 +89,28 @@ class HostExecutor:
     #: can still want one for what runs *alongside* it.
     runtime: str = ""
 
-    def create(self, name: str, *, workdir: str, mounts: list[str], network: str = "") -> None:
+    def create(
+        self,
+        name: str,
+        *,
+        workdir: str,
+        mounts: list[str],
+        network: str = "",
+        cap_add: list[str] | None = None,
+        cap_drop: list[str] | None = None,
+    ) -> None:
         """Nothing to create — the instance is the execution context.
 
         ``mounts`` is irrelevant here: the paths the caller would bind
         are already the instance's own filesystem. So is ``network``:
         a job on the instance reaches its services over the instance's
         own stack, by the ports they publish onto it.
+
+        ``cap_add`` / ``cap_drop`` are container-runtime knobs with no
+        meaning for a job that runs as the instance itself: there is no
+        inner container whose capability set to adjust, and the
+        instance's own capabilities are the profile's business. Ignored,
+        as the proto permits for a backend that cannot apply them.
         """
 
     def start(self) -> None:
@@ -171,7 +186,16 @@ class ContainerExecutor:
         detail = (err.strip() or out.strip()).splitlines()
         return detail[-1] if detail else "no output"
 
-    def create(self, name: str, *, workdir: str, mounts: list[str], network: str = "") -> None:
+    def create(
+        self,
+        name: str,
+        *,
+        workdir: str,
+        mounts: list[str],
+        network: str = "",
+        cap_add: list[str] | None = None,
+        cap_drop: list[str] | None = None,
+    ) -> None:
         """Pull the image and create an idle container named ``name``.
 
         Created but not started, mirroring the ``Create`` RPC this serves:
@@ -183,6 +207,12 @@ class ContainerExecutor:
         the layout promised in ``CreateResponse`` stays true on both
         sides. ``network``, when the job has services, joins the
         container to theirs so a step can reach them by name.
+
+        ``cap_add`` / ``cap_drop`` are the workflow's capability requests
+        for the job container, passed straight to ``--cap-add`` /
+        ``--cap-drop``. This is where they belong: the runtime applies
+        them to the inner container, the one the job's steps actually run
+        in.
         """
         rc, out, err = self._run("pull", self.image)
         if rc != 0:
@@ -195,6 +225,10 @@ class ContainerExecutor:
             args += ["--network", network]
         for mount in mounts:
             args += ["--volume", mount]
+        for cap in cap_add or []:
+            args += ["--cap-add", cap]
+        for cap in cap_drop or []:
+            args += ["--cap-drop", cap]
         args += [self.image, *_ENTRY_POINT]
 
         rc, out, err = self._run(*args)

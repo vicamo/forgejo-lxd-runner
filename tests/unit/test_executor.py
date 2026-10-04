@@ -152,11 +152,12 @@ def test_host_executor_is_inert() -> None:
     client = make_client()
     executor = HostExecutor(client=client, instance=INSTANCE)
 
-    executor.create("ignored", workdir="/work", mounts=[])
+    executor.create("ignored", workdir="/work", mounts=[], cap_add=["SYS_ADMIN"], cap_drop=["ALL"])
     executor.start()
     executor.cleanup()
     assert executor.wrap(["echo", "hi"]) == (["echo", "hi"], None, None, None)
-    # Critically: it never touches the instance.
+    # Critically: it never touches the instance -- capability requests
+    # included, since there is no inner container to apply them to.
     assert client.calls == []
 
 
@@ -185,6 +186,40 @@ def test_create_pulls_then_creates_an_idle_container() -> None:
     assert executor.container == "job-abc"
     # Created, not started: that is Start's job.
     assert not any(call[:2] == ["docker", "start"] for call in client.calls)
+
+
+def test_create_passes_capability_requests_to_the_runtime() -> None:
+    """cap_add / cap_drop reach the inner container as --cap-add / --cap-drop."""
+    client = make_client([(0, "", ""), (0, "", ""), (0, "[]", "")])
+    executor = ContainerExecutor(
+        client=client,
+        instance=INSTANCE,
+        image="node:20",
+        runtime="docker",
+    )
+
+    executor.create(
+        "job-abc",
+        workdir="/work",
+        mounts=[],
+        cap_add=["SYS_ADMIN", "NET_ADMIN"],
+        cap_drop=["MKNOD"],
+    )
+
+    create = client.calls[1]
+    assert create[create.index("--cap-add") : create.index("--cap-add") + 2] == [
+        "--cap-add",
+        "SYS_ADMIN",
+    ]
+    # Each capability is its own flag/value pair, in request order.
+    pairs = [
+        create[i : i + 2] for i, tok in enumerate(create) if tok in ("--cap-add", "--cap-drop")
+    ]
+    assert pairs == [
+        ["--cap-add", "SYS_ADMIN"],
+        ["--cap-add", "NET_ADMIN"],
+        ["--cap-drop", "MKNOD"],
+    ]
 
 
 def test_start_starts_the_created_container() -> None:
