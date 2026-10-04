@@ -512,6 +512,12 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         profiles = [p.strip() for p in profiles_raw.split(",") if p.strip()]
         if profiles:
             config["profiles"] = profiles
+        # ``type`` backend option: LXD instance type -- ``container`` (the LXD
+        # default) or ``virtual-machine``. LXD vocabulary; unknown values are
+        # forwarded so LXD produces the descriptive error rather than us
+        # second-guessing it.
+        if instance_type := request.backend_options.get("type"):
+            config["type"] = instance_type
         try:
             self._client.launch_instance(
                 config, timeout=self._effective_create_timeout(request), project=project
