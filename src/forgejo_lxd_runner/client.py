@@ -548,6 +548,76 @@ class BackendClient:
         resp.raise_for_status()
 
     # ------------------------------------------------------------------
+    # Networks
+
+    def create_network(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        config: dict[str, str] | None = None,
+        project: str | None = None,
+    ) -> None:
+        """Create managed network ``name`` on the daemon.
+
+        ``POST /1.0/networks`` is synchronous on LXD 5.x and Incus, but
+        LXD 6.0 made it asynchronous — it replies ``202 Accepted`` with an
+        operation that must be waited on before the bridge actually
+        exists. Dispatch on the response envelope's ``type``: wait out an
+        ``async`` operation, return immediately on a ``sync`` reply.
+        Skipping the wait races the instance create that references the
+        bridge, which then fails with ``Network not found``. Only the keys
+        the caller supplies are sent; the daemon fills in the rest (type
+        defaults to ``bridge``, ``ipv4.address`` to a free subnet, and so
+        on). A duplicate name surfaces as ``httpx.HTTPStatusError`` (409)
+        for the caller to map.
+
+        A bridge network's name becomes the host's Linux bridge
+        interface name, so it is capped at 15 characters — the caller
+        picks a short name, not this method's concern.
+        """
+
+        payload: dict[str, Any] = {"name": name}
+        if description is not None:
+            payload["description"] = description
+        if config is not None:
+            payload["config"] = config
+        resp = self.request("POST", "/1.0/networks", project=project, json=payload)
+        resp.raise_for_status()
+        envelope = resp.json()
+        if envelope.get("type") == "async":
+            self.operation_wait(envelope.get("metadata") or {}, project=project)
+
+    def remove_network(
+        self,
+        name: str,
+        *,
+        project: str | None = None,
+    ) -> None:
+        """Remove managed network ``name``, tolerating "already gone".
+
+        Mirrors :meth:`remove_profile`'s contract: the post-condition is
+        ``network <name> does not exist in <project>``, which a 404
+        already satisfies. Every other status still raises. The daemon
+        refuses to delete a network instances still use — that surfaces
+        as a 400 and is the caller's problem.
+
+        ``DELETE /1.0/networks/{name}`` is synchronous on Incus but
+        asynchronous on LXD 6.0 — it replies ``202 Accepted`` with an
+        operation that must be waited on, otherwise the post-condition
+        isn't guaranteed when the method returns. Dispatch on the
+        envelope ``type`` like :meth:`create_network`.
+        """
+
+        resp = self.request("DELETE", f"/1.0/networks/{name}", project=project)
+        if resp.status_code == 404:
+            return
+        resp.raise_for_status()
+        envelope = resp.json()
+        if envelope.get("type") == "async":
+            self.operation_wait(envelope.get("metadata") or {}, project=project)
+
+    # ------------------------------------------------------------------
     # Exec streaming
 
     def exec_capture(
