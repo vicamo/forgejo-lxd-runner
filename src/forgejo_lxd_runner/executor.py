@@ -88,6 +88,11 @@ class HostExecutor:
     #: the instance needs no runtime to run its own steps -- but a job
     #: can still want one for what runs *alongside* it.
     runtime: str = ""
+    #: The LXD project the instance lives in, or ``None`` for the
+    #: daemon's default. Every instance exec this executor issues must
+    #: carry it, or the daemon looks for the instance in the wrong
+    #: project and reports it missing.
+    project: str | None = None
 
     def create(
         self,
@@ -151,7 +156,9 @@ class HostExecutor:
             return None
         if user.isdigit():
             return int(user)
-        rc, out, _ = self.client.exec_capture(self.instance, ["getent", "passwd", user])
+        rc, out, _ = self.client.exec_capture(
+            self.instance, ["getent", "passwd", user], project=self.project
+        )
         # getent exits 2 when the key is not found; any non-zero means we
         # have no UID to run as.
         if rc != 0 or ":" not in out:
@@ -175,11 +182,15 @@ class ContainerExecutor:
     image: str
     runtime: str
     container: str = ""
+    #: The LXD project the instance lives in; every ``<runtime>`` call
+    #: runs through an instance exec, so it must carry the same project
+    #: scope the instance was created under.
+    project: str | None = None
     #: Populated by :meth:`create`; see the note there on why it is not
     #: read lazily.
 
     def _run(self, *args: str) -> tuple[int, str, str]:
-        return self.client.exec_capture(self.instance, [self.runtime, *args])
+        return self.client.exec_capture(self.instance, [self.runtime, *args], project=self.project)
 
     @staticmethod
     def _last_line(out: str, err: str) -> str:
@@ -337,10 +348,13 @@ class ServiceSet:
     instance: str
     runtime: str
     network: str = ""
+    #: The LXD project the instance lives in, passed through to every
+    #: instance exec that drives the service containers.
+    project: str | None = None
     containers: list[str] = field(default_factory=list)
 
     def _run(self, *args: str) -> tuple[int, str, str]:
-        return self.client.exec_capture(self.instance, [self.runtime, *args])
+        return self.client.exec_capture(self.instance, [self.runtime, *args], project=self.project)
 
     @staticmethod
     def _last_line(out: str, err: str) -> str:
@@ -408,7 +422,7 @@ class ServiceSet:
 Executor = HostExecutor | ContainerExecutor
 
 
-def detect_runtime(client: BackendClient, instance: str) -> str:
+def detect_runtime(client: BackendClient, instance: str, *, project: str | None = None) -> str:
     """Return the container runtime available inside ``instance``, or ``""``.
 
     Probe for each known runtime and wait for the one found to answer,
@@ -423,7 +437,8 @@ def detect_runtime(client: BackendClient, instance: str) -> str:
     available = [
         runtime
         for runtime in _RUNTIMES
-        if client.exec_capture(instance, ["sh", "-c", f"command -v {runtime}"])[0] == 0
+        if client.exec_capture(instance, ["sh", "-c", f"command -v {runtime}"], project=project)[0]
+        == 0
     ]
     if not available:
         return ""
@@ -431,7 +446,7 @@ def detect_runtime(client: BackendClient, instance: str) -> str:
     runtime = available[0]
     deadline = time.monotonic() + _DAEMON_READY_TIMEOUT
     while True:
-        rc, _, err = client.exec_capture(instance, [runtime, "version"])
+        rc, _, err = client.exec_capture(instance, [runtime, "version"], project=project)
         if rc == 0:
             return runtime
         if time.monotonic() >= deadline:
@@ -444,7 +459,9 @@ def detect_runtime(client: BackendClient, instance: str) -> str:
         time.sleep(_DAEMON_POLL_INTERVAL)
 
 
-def resolve(client: BackendClient, instance: str, image: str) -> Executor:
+def resolve(
+    client: BackendClient, instance: str, image: str, *, project: str | None = None
+) -> Executor:
     """Pick the execution context for a job.
 
     Empty ``image`` -- the common case -- runs on the instance.
@@ -453,11 +470,14 @@ def resolve(client: BackendClient, instance: str, image: str) -> Executor:
     The runtime is detected either way: what a job runs *in* does not
     change what the instance *has*, and an execution context that knows
     its instance's runtime can act on it whatever the job asked for.
+
+    ``project`` is the LXD project the instance was created under; the
+    executor carries it so its instance execs land in the right place.
     """
-    runtime = detect_runtime(client, instance)
+    runtime = detect_runtime(client, instance, project=project)
 
     if not image:
-        return HostExecutor(client=client, instance=instance, runtime=runtime)
+        return HostExecutor(client=client, instance=instance, runtime=runtime, project=project)
 
     if not runtime:
         raise ExecutorError(
@@ -473,6 +493,7 @@ def resolve(client: BackendClient, instance: str, image: str) -> Executor:
         instance=instance,
         image=image,
         runtime=runtime,
+        project=project,
     )
 
 

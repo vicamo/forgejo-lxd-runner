@@ -578,3 +578,72 @@ def test_job_container_without_services_joins_no_network() -> None:
     executor.create("job-1-job", workdir="/w", mounts=[])
 
     assert "--network" not in client.calls[-1]
+
+
+# -----------------------
+# LXD project scope
+# -----------------------
+
+
+def _exec_projects(client: MagicMock) -> list[str | None]:
+    """The ``project=`` passed to every ``exec_capture`` call, in order."""
+    return [call.kwargs.get("project") for call in client.exec_capture.call_args_list]
+
+
+def test_resolve_carries_the_project_into_every_instance_exec() -> None:
+    """Runtime detection runs in the instance's project, not the default."""
+    client = make_client()
+
+    executor = resolve(client, INSTANCE, "", project="tenant-a")
+
+    assert isinstance(executor, HostExecutor)
+    assert executor.project == "tenant-a"
+    # detect_runtime probed the instance; each probe named the project.
+    assert _exec_projects(client) == ["tenant-a"] * len(client.calls)
+
+
+def test_container_executor_scopes_its_runtime_calls_to_the_project() -> None:
+    """Every ``<runtime>`` call is an instance exec and must name the project."""
+    client = make_client([(0, "", ""), (0, "", ""), (0, "[]", "")])
+    executor = ContainerExecutor(
+        client=client,
+        instance=INSTANCE,
+        image="node:20",
+        runtime="docker",
+        project="tenant-a",
+    )
+
+    executor.create("job-abc", workdir="/work", mounts=[])
+
+    assert _exec_projects(client) == ["tenant-a"] * len(client.calls)
+
+
+def test_host_executor_scopes_a_user_lookup_to_the_project() -> None:
+    """The getent probe runs inside the instance, so it carries the project."""
+    client = make_client([(0, "ubuntu:x:1000:1000::/home/ubuntu:/bin/bash\n", "")])
+    executor = HostExecutor(client=client, instance=INSTANCE, project="tenant-a")
+
+    executor.wrap(["id"], user="ubuntu")
+
+    assert _exec_projects(client) == ["tenant-a"]
+
+
+def test_service_set_scopes_its_runtime_calls_to_the_project() -> None:
+    """Service containers run through the same project-scoped instance exec."""
+    client = make_client()
+    services = ServiceSet(
+        client=client, instance=INSTANCE, runtime="docker", network="job-1", project="tenant-a"
+    )
+
+    services.create([Service(name="redis", image="redis:7", env={}, ports=[])])
+
+    assert _exec_projects(client) == ["tenant-a"] * len(client.calls)
+
+
+def test_project_defaults_to_none_when_unset() -> None:
+    """No project option means the daemon's default; nothing is forced."""
+    client = make_client()
+    executor = resolve(client, INSTANCE, "")
+
+    assert executor.project is None
+    assert _exec_projects(client) == [None] * len(client.calls)
