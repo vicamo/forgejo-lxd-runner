@@ -57,6 +57,20 @@ class BackendOperationError(RuntimeError):
     """
 
 
+class BackendOperationTimeout(RuntimeError):
+    """An async LXD / Incus operation didn't finish inside ``timeout``.
+
+    Raised by ``operation_wait`` when the daemon returns the still-
+    ``running`` (``status_code=101``) operation record because the
+    ``?timeout=<seconds>`` window elapsed. ``args[0]`` is the timeout
+    value in seconds.
+    """
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__(f"timed out after {timeout}s")
+        self.timeout = timeout
+
+
 # LXD/Incus instance state ``status_code`` values. Mirrored from the daemon's
 # ``shared.StatusCodeStopped`` constant; documented at
 # https://documentation.ubuntu.com/lxd/latest/rest-api/#instances .
@@ -247,6 +261,9 @@ class BackendClient:
         # is only possible under an explicit timeout.
         if body.get("status_code") == 400:
             raise BackendOperationError(str(body.get("err") or "operation failed"))
+        if timeout is not None and timeout > 0 and body.get("status_code") == 101:
+            # The daemon returned before the op finished -- still running.
+            raise BackendOperationTimeout(timeout)
         return body
 
     @overload

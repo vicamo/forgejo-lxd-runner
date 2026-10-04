@@ -28,7 +28,7 @@ from collections.abc import Iterator
 import grpc
 import httpx
 
-from .client import BackendClient, BackendOperationError
+from .client import BackendClient, BackendOperationError, BackendOperationTimeout
 from .executor import (
     ContainerExecutor,
     Executor,
@@ -225,7 +225,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     processes so each is addressable under a distinct scheme.
     """
 
-    def __init__(self, name: str = DEFAULT_NAME) -> None:
+    def __init__(
+        self,
+        name: str = DEFAULT_NAME,
+        max_environment_timeout: float | None = None,
+    ) -> None:
         # The name is what Forgejo runner labels reference via the
         # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
         # an operator run several plugin processes side by side — each
@@ -237,6 +241,35 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         self._client = BackendClient()
         self._envs: dict[str, _Env] = {}
         self._lock = threading.Lock()
+        # Upper bound on how long ``Create`` will wait for LXD to finish
+        # provisioning an instance. ``None`` (or ``<=0``) means no cap;
+        # the runner-supplied ``environment_timeout`` is honoured as-is.
+        # See ``_effective_create_timeout`` for how the two combine.
+        self._max_create_timeout: float | None = (
+            max_environment_timeout
+            if max_environment_timeout and max_environment_timeout > 0
+            else None
+        )
+
+    def _effective_create_timeout(self, request: plugin_pb2.CreateRequest) -> float | None:
+        """Combine runner-supplied and plugin-configured caps.
+
+        The runner's ``environment_timeout`` is the deadline the workflow
+        expects to be honoured; the plugin's ``max_environment_timeout``
+        protects the LXD host from a workflow claiming an absurdly long
+        setup budget. When both are set we take the smaller. ``0`` on
+        either side means "no bound from me" — the other still applies.
+        Returns ``None`` when neither bounds the call (wait forever, the
+        REST default).
+        """
+        runner = (
+            request.environment_timeout.ToNanoseconds() / 1e9
+            if request.HasField("environment_timeout")
+            else 0
+        )
+        cap = self._max_create_timeout
+        candidates = [t for t in (runner, cap) if t and t > 0]
+        return min(candidates) if candidates else None
 
     # ------------------------------------------------------------------
     # helpers
@@ -436,7 +469,17 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if profiles:
             config["profiles"] = profiles
         try:
-            self._client.launch_instance(config)
+            self._client.launch_instance(config, timeout=self._effective_create_timeout(request))
+        except BackendOperationTimeout as exc:
+            # LXD may have created (and even started) the instance while
+            # we timed out waiting. Best-effort delete keeps the host
+            # from accumulating orphans; the runner is already aborting.
+            self._discard(name, network)
+            context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                f"lxd create {image!r} exceeded {exc.timeout}s",
+            )
+            raise AssertionError("unreachable") from exc
         except (httpx.HTTPError, BackendOperationError) as exc:
             # The instance never came up, so nothing references the
             # network yet -- drop it so a failed Create leaves nothing.
