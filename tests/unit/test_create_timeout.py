@@ -75,7 +75,7 @@ def test_create_times_out_and_cleans_up(
 
     assert exc.value.code == grpc.StatusCode.DEADLINE_EXCEEDED  # type: ignore[attr-defined]
     # Best-effort cleanup removes the partial instance and its bridge.
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
     mock_backend_client.remove_network.assert_called_once()
     assert "job-1" not in service._envs  # noqa: SLF001
 

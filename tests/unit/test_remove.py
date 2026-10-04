@@ -45,7 +45,7 @@ def test_remove_delegates_to_client(
 ) -> None:
     service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
 
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
     context.abort.assert_not_called()
     assert "job-1" not in service._envs  # noqa: SLF001
 
@@ -144,7 +144,7 @@ def test_remove_deletes_the_instance_when_the_container_will_not_die(
 
     service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
 
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
     context.abort.assert_not_called()
 
 
@@ -157,7 +157,7 @@ def test_remove_without_a_container_touches_only_the_instance(
     service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
 
     mock_backend_client.exec_capture.assert_not_called()
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
 
 
 def test_remove_deletes_the_network_after_the_instance(
@@ -178,7 +178,7 @@ def test_remove_deletes_the_network_after_the_instance(
     service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
 
     assert calls == ["instance", "network"]
-    mock_backend_client.remove_network.assert_called_once_with("flr-abc123")
+    mock_backend_client.remove_network.assert_called_once_with("flr-abc123", project=None)
     context.abort.assert_not_called()
 
 
@@ -243,7 +243,7 @@ def test_remove_tears_services_down_after_the_job_container(
     svc_rm = calls.index(["docker", "rm", "--force", "job-1-redis"])
     net_rm = calls.index(["docker", "network", "rm", "job-1"])
     assert job_rm < svc_rm < net_rm
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
 
 
 def test_remove_without_services_touches_no_network(

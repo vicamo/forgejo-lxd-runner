@@ -54,9 +54,11 @@ def test_copy_in_replays_tar_entries_as_rest_pushes(
     assert isinstance(resp, plugin_pb2.CopyInResponse)
     # The dest directory is created up front, then each tar entry maps
     # to a matching client call.
-    assert with_env.push_directory.call_args_list == [call("job-1", "/work")]
-    with_env.push_file.assert_called_once_with("job-1", "/work/hello.txt", b"hi", mode=0o644)
-    with_env.push_symlink.assert_called_once_with("job-1", "/work/link", "hello.txt")
+    assert with_env.push_directory.call_args_list == [call("job-1", "/work", project=None)]
+    with_env.push_file.assert_called_once_with(
+        "job-1", "/work/hello.txt", b"hi", mode=0o644, project=None
+    )
+    with_env.push_symlink.assert_called_once_with("job-1", "/work/link", "hello.txt", project=None)
 
 
 def test_copy_in_creates_every_missing_parent_directory(
@@ -78,9 +80,9 @@ def test_copy_in_creates_every_missing_parent_directory(
     service.CopyIn(iter(chunks), context)
 
     assert with_env.push_directory.call_args_list == [
-        call("job-1", "/root"),
-        call("job-1", "/root/actions-runner"),
-        call("job-1", "/root/actions-runner/act"),
+        call("job-1", "/root", project=None),
+        call("job-1", "/root/actions-runner", project=None),
+        call("job-1", "/root/actions-runner/act", project=None),
     ]
 
 
@@ -118,7 +120,7 @@ def test_copy_out_streams_tar_of_src_path(
     with_env: MagicMock,
 ) -> None:
     # Simulate ``/some/dir`` containing one file: ``out.txt`` with body b"bye".
-    def _pull(instance: str, path: str) -> tuple[str, bytes, int]:
+    def _pull(instance: str, path: str, project: str | None = None) -> tuple[str, bytes, int]:
         assert instance == "job-1"
         if path == "/some/dir":
             return "directory", b'["out.txt"]', 0o755

@@ -51,7 +51,7 @@ def test_exec_streams_stdout_stderr_then_complete(
     assert outs[2].exec_complete.exit_code == 0
 
     with_env.exec_stream.assert_called_once_with(
-        "job-1", ["echo", "hi"], environment=None, user=None, cwd=None
+        "job-1", ["echo", "hi"], environment=None, user=None, cwd=None, project=None
     )
 
 
@@ -104,7 +104,7 @@ def test_exec_resolves_a_host_user_name_to_a_uid(
     _drain(service.Exec(req, context))
 
     with_env.exec_stream.assert_called_once_with(
-        "job-1", ["id"], environment=None, user=1000, cwd=None
+        "job-1", ["id"], environment=None, user=1000, cwd=None, project=None
     )
 
 

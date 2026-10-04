@@ -57,4 +57,4 @@ def test_create_start_remove_lifecycle(
     # than launching stopped and starting it afterwards.
     config = mock_backend_client.launch_instance.call_args.args[0]
     assert config["start"] is True
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
