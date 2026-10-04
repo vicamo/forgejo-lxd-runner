@@ -6,9 +6,8 @@ dogfood against a real Forgejo runner, then pile features up one at a
 time. Each item should land as its own atomic, sign-off commit;
 `nox -s fmt` must be a no-op after each.
 
-The sections below mix scope: `Backend options` is workflow-author
-`backend_options` knobs, `Runtime / correctness` is behavioural fixes,
-and `Operational` is CLI flags for the operator. Everything under
+The sections below mix scope: `Runtime / correctness` is behavioural
+fixes, and `Operational` is CLI flags for the operator. Everything under
 `Nice-to-have` is pure planning — nothing yet.
 
 ## Runtime / correctness
@@ -16,13 +15,6 @@ and `Operational` is CLI flags for the operator. Everything under
 - [ ] Signal-handler shutdown polish: current `_handle` in
       `__main__.serve` mixes `stop.set()` and `server.stop(grace=5)`;
       simplify to one path (stop checker → `server.stop(grace=…).wait()`).
-
-## Backend options (workflow-author-facing knobs on `CreateRequest.backend_options`)
-
-- [ ] `ephemeral`: parse the usual truthy/falsy strings
-      (`true/1/yes/on` and `false/0/no/off`, case + whitespace
-      insensitive) into `config["ephemeral"]`. Absent → LXD default.
-      Invalid → `INVALID_ARGUMENT`.
 
 ## Operational (operator-facing CLI flags)
 

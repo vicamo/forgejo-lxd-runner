@@ -518,6 +518,25 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # second-guessing it.
         if instance_type := request.backend_options.get("type"):
             config["type"] = instance_type
+        # ``ephemeral`` backend option: when truthy, LXD deletes the instance
+        # the moment it's stopped (config key ``ephemeral: true``). Belt-and-
+        # braces for the ``Remove`` path -- if the instance gets stopped by
+        # anything else (host reboot, ``lxc stop`` from ops), LXD cleans up
+        # instead of leaving an orphan. Absent -> LXD default (non-ephemeral).
+        # Accepted true values: ``true``, ``1``, ``yes``, ``on`` (case- and
+        # whitespace-insensitive); false likewise. A typo is rejected rather
+        # than silently treated as non-ephemeral.
+        if ephemeral := request.backend_options.get("ephemeral"):
+            normalized = ephemeral.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                config["ephemeral"] = True
+            elif normalized in {"false", "0", "no", "off"}:
+                config["ephemeral"] = False
+            else:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"ephemeral: expected boolean, got {ephemeral!r}",
+                )
         try:
             self._client.launch_instance(
                 config, timeout=self._effective_create_timeout(request), project=project
