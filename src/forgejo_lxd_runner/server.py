@@ -604,25 +604,24 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
         environ = dict(request.env) if request.env else None
         cwd = request.workdir or None
-        # ``request.user`` is proto3 ``optional string``. Only numeric
-        # UIDs for now; name lookup is a later commit.
-        uid: int | None = None
-        if request.HasField("user") and request.user:
-            try:
-                uid = int(request.user)
-            except ValueError:
-                context.abort(
-                    grpc.StatusCode.INVALID_ARGUMENT,
-                    f"user must be a numeric UID for now, got {request.user!r}",
-                )
+        # ``request.user`` is proto3 ``optional string`` -- a name or a
+        # numeric UID. Each executor resolves it where it belongs: a host
+        # job against the instance's passwd, a container job against the
+        # container's (see ``wrap``). An unresolvable name is a bad input.
+        user = request.user if request.HasField("user") and request.user else None
 
         try:
             command, environ, uid, cwd = env.executor.wrap(
                 list(request.command),
                 environment=environ,
-                user=str(uid) if uid is not None else None,
+                user=user,
                 cwd=cwd,
             )
+        except ExecutorError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise AssertionError("unreachable") from exc
+
+        try:
             for kind, payload in self._client.exec_stream(
                 env.instance_name,
                 command,

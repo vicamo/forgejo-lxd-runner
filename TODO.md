@@ -26,10 +26,6 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
 - [ ] `CreateRequest.cap_drop`: advisory Linux capability *drops*.
       Translate to `raw.lxc lxc.cap.drop` entries; symmetric handling
       to `cap_add`.
-- [ ] `ExecRequest.user` (name form): `Exec` currently accepts only
-      numeric UIDs and rejects names with `INVALID_ARGUMENT`. Resolve
-      names via `getent passwd <name>` inside the instance (or
-      `/etc/passwd` scrape) and pass the UID into `exec_stream`.
 
 ## Runtime / correctness
 

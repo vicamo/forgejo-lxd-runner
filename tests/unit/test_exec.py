@@ -94,13 +94,28 @@ def test_exec_emits_exec_failed_on_client_error(
     assert "nope" in outs[0].exec_failed.error_message
 
 
-def test_exec_rejects_non_numeric_user(
+def test_exec_resolves_a_host_user_name_to_a_uid(
+    service: BackendPluginService, context: MagicMock, with_env: MagicMock
+) -> None:
+    with_env.exec_capture.return_value = (0, "ubuntu:x:1000:1000::/home/ubuntu:/bin/bash\n", "")
+    with_env.exec_stream.return_value = _stream(("exit", 0))
+    req = plugin_pb2.ExecRequest(environment_id="job-1", command=["id"], user="ubuntu")
+
+    _drain(service.Exec(req, context))
+
+    with_env.exec_stream.assert_called_once_with(
+        "job-1", ["id"], environment=None, user=1000, cwd=None
+    )
+
+
+def test_exec_rejects_an_unknown_user(
     service: BackendPluginService,
     context: MagicMock,
     aborted: type[Exception],
-    with_env: MagicMock,  # noqa: ARG001
+    with_env: MagicMock,
 ) -> None:
-    req = plugin_pb2.ExecRequest(environment_id="job-1", command=["id"], user="ubuntu")
+    with_env.exec_capture.return_value = (2, "", "")
+    req = plugin_pb2.ExecRequest(environment_id="job-1", command=["id"], user="ghost")
     with pytest.raises(aborted) as exc:
         _drain(service.Exec(req, context))
     assert exc.value.code == grpc.StatusCode.INVALID_ARGUMENT  # type: ignore[attr-defined]
