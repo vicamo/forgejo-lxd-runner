@@ -13,9 +13,10 @@ here we instead alias an image already cached on the host, so the test
 needs no network egress and no image pull. The module skips when the
 host has no cached container image to alias.
 
-These are the only tests that observe ``CreateResponse.arch`` and
-``CreateResponse.os`` over the full stack -- every other tier reads the
-raw instance record or mocks the client.
+These are the only tests that observe ``CreateResponse.arch``,
+``CreateResponse.os`` and the POSIX shell-semantics fields over the full
+stack -- every other tier reads the raw instance record or mocks the
+client.
 
 Skipped when no daemon socket is autodetected.
 """
@@ -175,3 +176,23 @@ def test_create_reports_os(
     """
     with _created(plugin_stub, real_client, local_image) as resp:
         assert resp.os == "Linux", f"unexpected RUNNER_OS {resp.os!r}"
+
+
+def test_create_reports_posix_shell_semantics(
+    plugin_stub: plugin_pb2_grpc.BackendPluginStub,
+    real_client: BackendClient,
+    local_image: str,
+) -> None:
+    """Create reports the fixed POSIX shell semantics of this backend.
+
+    These four fields are not derived from the instance -- the backend
+    always execs through a Linux shell over POSIX paths -- so a real
+    Create must report the POSIX values verbatim.
+    """
+    with _created(plugin_stub, real_client, local_image) as resp:
+        assert resp.path_variable_name == "PATH"
+        assert resp.path_separator == ":"
+        assert resp.environment_case_insensitive is False
+        assert resp.default_path_variable == (
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        )

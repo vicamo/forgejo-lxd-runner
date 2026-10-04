@@ -49,11 +49,22 @@ _STATUS_RUNNING = 103
 _COPY_CHUNK_SIZE = 256 * 1024
 
 # The filesystem layout promised to Forgejo in ``CreateResponse``.
-# TODO: discover os/arch and expose a knob for these.
+# TODO: expose a knob for these paths.
 _ROOT_PATH = "/root/actions-runner"
 _ACT_PATH = "/root/actions-runner/act"
 _TOOL_CACHE_PATH = "/opt/hostedtoolcache"
 _TEMP_PATH = "/tmp"
+
+# The shell semantics promised to Forgejo in ``CreateResponse``. This
+# backend always execs through a POSIX shell inside the instance, even
+# when the reported OS is Windows or macOS -- the mount layout and
+# CopyIn/CopyOut above are POSIX-only -- so these are fixed, not derived
+# from the image. (Windows would need ``Path`` / ``;`` / case-insensitive
+# here, and a non-POSIX exec/mount layer to match.)
+_PATH_VARIABLE_NAME = "PATH"
+_PATH_SEPARATOR = ":"
+_DEFAULT_PATH_VARIABLE = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_ENVIRONMENT_CASE_INSENSITIVE = False
 
 #: Bind-mounted into a job container at identical paths, so the layout
 #: above stays true inside it and CopyIn/CopyOut need no translation.
@@ -494,6 +505,10 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             act_path=_ACT_PATH,
             tool_cache_path=_TOOL_CACHE_PATH,
             temp_path=_TEMP_PATH,
+            path_variable_name=_PATH_VARIABLE_NAME,
+            default_path_variable=_DEFAULT_PATH_VARIABLE,
+            path_separator=_PATH_SEPARATOR,
+            environment_case_insensitive=_ENVIRONMENT_CASE_INSENSITIVE,
             os=_lxd_os_to_gha(image_os),
             arch=_lxd_arch_to_gha(architecture),
         )
