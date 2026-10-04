@@ -262,6 +262,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         self,
         name: str = DEFAULT_NAME,
         max_environment_timeout: float | None = None,
+        instance_name_prefix: str = "",
     ) -> None:
         # The name is what Forgejo runner labels reference via the
         # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
@@ -283,6 +284,12 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             if max_environment_timeout and max_environment_timeout > 0
             else None
         )
+        # Prepended to every LXD instance name at Create time. The runner's
+        # ``environment_id`` (== ``CreateRequest.name``) is unchanged; only
+        # the LXD-side name is namespaced. Empty (default) preserves the
+        # previous 1:1 mapping. Operators set this to disambiguate multiple
+        # daemons sharing one LXD project -- see ``--instance-name-prefix``.
+        self._instance_name_prefix = instance_name_prefix
 
     def _effective_create_timeout(self, request: plugin_pb2.CreateRequest) -> float | None:
         """Combine runner-supplied and plugin-configured caps.
@@ -466,6 +473,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if not name:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
 
+        # The LXD-side instance name is namespaced by the operator-set
+        # prefix; the runner-facing ``environment_id`` stays ``name``.
+        # Empty prefix (default) keeps the 1:1 mapping.
+        lxd_name = self._instance_name_prefix + name
+
         # ``project`` backend option: create the instance, its network and
         # everything else this environment owns inside the named LXD project
         # (per-tenant quotas, ACLs, isolation). Absent -> ``None``, and the
@@ -496,7 +508,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # the only way to probe anything inside the instance is to have it
         # running by the time Create returns.
         config: dict[str, object] = {
-            "name": name,
+            "name": lxd_name,
             "source": {"type": "image", "alias": image},
             "start": True,
             # Put the instance's NIC on its own network, overriding any
@@ -545,7 +557,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             # LXD may have created (and even started) the instance while
             # we timed out waiting. Best-effort delete keeps the host
             # from accumulating orphans; the runner is already aborting.
-            self._discard(name, network, project=project)
+            self._discard(lxd_name, network, project=project)
             context.abort(
                 grpc.StatusCode.DEADLINE_EXCEEDED,
                 f"lxd create {image!r} exceeded {exc.timeout}s",
@@ -565,10 +577,12 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # know there is anything to Remove, and the instance would be
         # left behind for an operator to find.
         try:
-            executor = resolve(self._client, name, request.image, project=project)
-            services = self._start_services(name, executor, list(request.services), project=project)
+            executor = resolve(self._client, lxd_name, request.image, project=project)
+            services = self._start_services(
+                lxd_name, executor, list(request.services), project=project
+            )
             executor.create(
-                f"{name}-job",
+                f"{lxd_name}-job",
                 workdir=_ROOT_PATH,
                 mounts=mount_specs(list(_JOB_CONTAINER_MOUNTS)),
                 network=services.network if services else "",
@@ -576,7 +590,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 cap_drop=list(request.cap_drop),
             )
         except ExecutorError as exc:
-            self._discard(name, network, project=project)
+            self._discard(lxd_name, network, project=project)
             # A missing runtime is the operator's to fix in the Forgejo
             # config; an unresolvable image is the workflow's.
             code = (
@@ -586,7 +600,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             )
             context.abort(code, str(exc))
         except (httpx.HTTPError, BackendOperationError) as exc:
-            self._discard(name, network, project=project)
+            self._discard(lxd_name, network, project=project)
             context.abort(_rest_error_to_grpc(exc), f"job container: {exc}")
 
         # The instance record carries the architecture the daemon settled
@@ -594,9 +608,9 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # RUNNER_ARCH / RUNNER_OS. A failure here is an instance we cannot
         # describe, so tear it down like any other post-launch failure.
         try:
-            metadata = self._client.get_instance(name, project=project)
+            metadata = self._client.get_instance(lxd_name, project=project)
         except (httpx.HTTPError, BackendOperationError) as exc:
-            self._discard(name, network, project=project)
+            self._discard(lxd_name, network, project=project)
             context.abort(_rest_error_to_grpc(exc), f"lxd instance fetch: {exc}")
             raise AssertionError("unreachable") from exc
         architecture = str(metadata.get("architecture", ""))
@@ -605,7 +619,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
         with self._lock:
             self._envs[name] = _Env(
-                instance_name=name,
+                instance_name=lxd_name,
                 executor=executor,
                 job_image=request.image,
                 services=services,
