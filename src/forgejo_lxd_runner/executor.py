@@ -106,16 +106,43 @@ class HostExecutor:
         command: list[str],
         *,
         environment: dict[str, str] | None = None,
-        user: int | None = None,
+        user: str | None = None,
         cwd: str | None = None,
     ) -> tuple[list[str], dict[str, str] | None, int | None, str | None]:
         """Run ``command`` as given, directly in the instance.
 
-        The instance exec already applies ``environment``, ``user`` and
-        ``cwd``, so they are handed back untouched for the caller to
-        pass on.
+        The instance exec already applies ``environment`` and ``cwd``, so
+        they are handed back untouched for the caller to pass on.
+
+        ``user`` is resolved here: LXD's instance exec takes a numeric UID
+        only, so a name is looked up against the instance's own
+        ``/etc/passwd`` via ``getent``. A numeric value is passed straight
+        through -- LXD runs an unmapped UID even with no passwd entry, and
+        an orphan numeric id is a legitimate request.
         """
-        return command, environment, user, cwd
+        uid = self._resolve_uid(user)
+        return command, environment, uid, cwd
+
+    def _resolve_uid(self, user: str | None) -> int | None:
+        """Translate an ``ExecRequest.user`` value to a numeric UID.
+
+        ``None``/empty -> ``None`` (the daemon's default user). An
+        all-digits value is already a UID. A name is resolved inside the
+        instance; an unknown name is a bad request, raised as a
+        non-precondition ``ExecutorError`` for the caller to map to
+        ``INVALID_ARGUMENT``.
+        """
+        if not user:
+            return None
+        if user.isdigit():
+            return int(user)
+        rc, out, _ = self.client.exec_capture(self.instance, ["getent", "passwd", user])
+        # getent exits 2 when the key is not found; any non-zero means we
+        # have no UID to run as.
+        if rc != 0 or ":" not in out:
+            raise ExecutorError(f"unknown user {user!r} in instance")
+        # passwd line: name:passwd:uid:gid:gecos:home:shell
+        return int(out.split(":")[2])
 
     def cleanup(self) -> None:
         """Nothing to remove; the instance outlives this object."""
@@ -190,7 +217,7 @@ class ContainerExecutor:
         command: list[str],
         *,
         environment: dict[str, str] | None = None,
-        user: int | None = None,
+        user: str | None = None,
         cwd: str | None = None,
     ) -> tuple[list[str], dict[str, str] | None, int | None, str | None]:
         """Return the argv that runs ``command`` inside the container.
@@ -200,6 +227,11 @@ class ContainerExecutor:
         applied to the outer instance exec they would configure the
         ``<runtime>`` process itself, leaving the job unaffected.
 
+        ``user`` is passed to ``<runtime> exec --user`` verbatim -- a name
+        or a numeric id. Unlike LXD's instance exec, the container runtime
+        resolves a name against the *container's* ``/etc/passwd``, which is
+        the right one for a job running inside it.
+
         Built rather than executed so the caller can stream it through
         ``exec_stream``: Exec is a streaming RPC and must not buffer a
         step's output.
@@ -207,8 +239,8 @@ class ContainerExecutor:
         args = [self.runtime, "exec"]
         for key, value in (environment or {}).items():
             args += ["--env", f"{key}={value}"]
-        if user is not None:
-            args += ["--user", str(user)]
+        if user:
+            args += ["--user", user]
         if cwd:
             args += ["--workdir", cwd]
         return [*args, self.container, *command], None, None, None

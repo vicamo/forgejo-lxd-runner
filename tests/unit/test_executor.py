@@ -307,7 +307,7 @@ def test_wrap_moves_env_user_and_cwd_onto_the_container() -> None:
     argv, environment, user, cwd = executor.wrap(
         ["env"],
         environment={"FOO": "bar"},
-        user=1000,
+        user="1000",
         cwd="/work",
     )
 
@@ -328,15 +328,50 @@ def test_wrap_moves_env_user_and_cwd_onto_the_container() -> None:
     assert (environment, user, cwd) == (None, None, None)
 
 
-def test_wrap_passes_host_env_user_and_cwd_straight_through() -> None:
+def test_wrap_passes_a_container_user_name_through_verbatim() -> None:
+    """A name goes to --user as-is; the runtime resolves it in the container."""
+    executor = ContainerExecutor(
+        client=make_client(),
+        instance=INSTANCE,
+        image="node:20",
+        runtime="docker",
+        container="job-abc",
+    )
+
+    argv, _, _, _ = executor.wrap(["id"], user="www-data")
+
+    assert argv == ["docker", "exec", "--user", "www-data", "job-abc", "id"]
+
+
+def test_wrap_passes_host_env_and_cwd_straight_through() -> None:
     executor = HostExecutor(client=make_client(), instance=INSTANCE)
 
-    assert executor.wrap(["env"], environment={"FOO": "bar"}, user=1000, cwd="/work") == (
+    # A numeric user is a UID already; no lookup, passed straight to LXD.
+    assert executor.wrap(["env"], environment={"FOO": "bar"}, user="1000", cwd="/work") == (
         ["env"],
         {"FOO": "bar"},
         1000,
         "/work",
     )
+
+
+def test_wrap_resolves_a_host_user_name_to_a_uid() -> None:
+    """LXD's instance exec is UID-only, so a name is resolved via getent."""
+    client = make_client([(0, "ubuntu:x:1000:1000::/home/ubuntu:/bin/bash\n", "")])
+    executor = HostExecutor(client=client, instance=INSTANCE)
+
+    _, _, uid, _ = executor.wrap(["id"], user="ubuntu")
+
+    assert uid == 1000
+    assert client.calls == [["getent", "passwd", "ubuntu"]]
+
+
+def test_wrap_rejects_an_unknown_host_user_name() -> None:
+    client = make_client([(2, "", "")])
+    executor = HostExecutor(client=client, instance=INSTANCE)
+
+    with pytest.raises(ExecutorError, match="unknown user"):
+        executor.wrap(["id"], user="nobody-here")
 
 
 def test_wrap_omits_flags_it_was_not_given() -> None:
@@ -349,7 +384,7 @@ def test_wrap_omits_flags_it_was_not_given() -> None:
     )
 
     # A zero UID is a real user (root) and must not be dropped as falsy.
-    argv, _, _, _ = executor.wrap(["id"], user=0)
+    argv, _, _, _ = executor.wrap(["id"], user="0")
 
     assert argv == ["docker", "exec", "--user", "0", "job-abc", "id"]
 

@@ -620,7 +620,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             command, environ, uid, cwd = env.executor.wrap(
                 list(request.command),
                 environment=environ,
-                user=uid,
+                user=str(uid) if uid is not None else None,
                 cwd=cwd,
             )
             for kind, payload in self._client.exec_stream(
