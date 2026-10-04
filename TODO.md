@@ -7,25 +7,9 @@ time. Each item should land as its own atomic, sign-off commit;
 `nox -s fmt` must be a no-op after each.
 
 The sections below mix scope: `Backend options` is workflow-author
-`backend_options` knobs, `Protocol coverage` is `plugin.v1alpha`
-fields the server currently drops on the floor, `Runtime /
-correctness` is behavioural fixes, and `Operational` is CLI flags for
-the operator. Everything under `Nice-to-have` is pure planning —
-nothing yet.
-
-## Protocol coverage (unhandled `plugin.v1alpha` fields)
-
-One bullet per proto field that the server currently drops on the
-floor. Each lands as its own atomic commit that wires the field into
-the LXD REST call it maps to (or documents why it's a no-op on LXD).
-
-- [ ] `CreateRequest.cap_add`: advisory Linux capability *additions*.
-      Translate to `security.privileged` / `raw.lxc lxc.cap.keep`
-      entries on the instance config; entries the LXD kernel refuses
-      abort `INVALID_ARGUMENT`.
-- [ ] `CreateRequest.cap_drop`: advisory Linux capability *drops*.
-      Translate to `raw.lxc lxc.cap.drop` entries; symmetric handling
-      to `cap_add`.
+`backend_options` knobs, `Runtime / correctness` is behavioural fixes,
+and `Operational` is CLI flags for the operator. Everything under
+`Nice-to-have` is pure planning — nothing yet.
 
 ## Runtime / correctness
 

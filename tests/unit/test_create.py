@@ -350,6 +350,30 @@ def test_create_prepares_the_job_container(
     assert service._envs["job-1"].executor is not None  # noqa: SLF001
 
 
+def test_create_forwards_capability_requests_to_the_job_container(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """cap_add / cap_drop ride through Create onto the container create."""
+    mock_backend_client.exec_capture.side_effect = [
+        (0, "/usr/bin/docker", ""),  # command -v docker
+        (1, "", ""),  # command -v podman
+        (0, "Server: Docker", ""),  # docker version
+        (0, "", ""),  # docker pull
+        (0, "deadbeef", ""),  # docker create
+        (0, "[]", ""),  # container inspect
+    ]
+
+    service.Create(_req(image="node:20", cap_add=["SYS_ADMIN"], cap_drop=["MKNOD"]), context)
+
+    context.abort.assert_not_called()
+    commands = [c.args[1] for c in mock_backend_client.exec_capture.call_args_list]
+    create = next(c for c in commands if c[:2] == ["docker", "create"])
+    assert create[create.index("--cap-add") + 1] == "SYS_ADMIN"
+    assert create[create.index("--cap-drop") + 1] == "MKNOD"
+
+
 def test_create_without_an_image_still_detects_the_runtime(
     service: BackendPluginService,
     context: MagicMock,
