@@ -29,12 +29,6 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
 
 ## Runtime / correctness
 
-- [ ] Map LXD HTTP errors to gRPC status codes so the runner's retry
-      logic distinguishes "operator misconfigured" from "LXD is
-      broken": 400/409/422 → `INVALID_ARGUMENT`, 404 → `NOT_FOUND`,
-      403 → `PERMISSION_DENIED`, everything else → `INTERNAL`. Apply
-      at every `context.abort` site.
-
 - [ ] Signal-handler shutdown polish: current `_handle` in
       `__main__.serve` mixes `stop.set()` and `server.stop(grace=5)`;
       simplify to one path (stop checker → `server.stop(grace=…).wait()`).
