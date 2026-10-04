@@ -30,13 +30,6 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
       numeric UIDs and rejects names with `INVALID_ARGUMENT`. Resolve
       names via `getent passwd <name>` inside the instance (or
       `/etc/passwd` scrape) and pass the UID into `exec_stream`.
-- [ ] Honour `CreateRequest.environment_timeout` with a plugin-side
-      cap (`--max-environment-timeout SECONDS`, default 0 = disabled).
-      `run_operation` already takes a `timeout` — thread the capped
-      value through the Create path. On timeout: best-effort delete
-      the half-created instance and abort `DEADLINE_EXCEEDED`.
-      `Duration.ToSeconds()` truncates to int — use
-      `ToNanoseconds() / 1e9`.
 
 ## Runtime / correctness
 

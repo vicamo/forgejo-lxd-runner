@@ -76,6 +76,21 @@ _OP_POLL_READ_MARGIN = 15
 # actually honoured.
 _OP_POLL_MIN_INTERVAL = 1.0
 
+
+class BackendOperationTimeout(RuntimeError):
+    """An async LXD / Incus operation didn't finish inside ``timeout``.
+
+    Raised by ``operation_wait`` when its overall wall-clock deadline
+    elapses while the daemon still reports the operation as running (a
+    non-terminal ``status_code`` such as ``103``). ``args[0]`` is the
+    timeout value in seconds.
+    """
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__(f"timed out after {timeout}s")
+        self.timeout = timeout
+
+
 # LXD/Incus instance state ``status_code`` values. Mirrored from the daemon's
 # ``shared.StatusCodeStopped`` constant; documented at
 # https://documentation.ubuntu.com/lxd/latest/rest-api/#instances .
@@ -246,9 +261,8 @@ class BackendClient:
         actually takes.
 
         ``timeout`` is an overall wall-clock deadline. When it elapses
-        before the operation finishes we return the still-running record
-        (distinguished from success by its ``status_code``). ``timeout=
-        None`` waits indefinitely, looping while the daemon keeps
+        before the operation finishes we raise ``BackendOperationTimeout``.
+        ``timeout=None`` waits indefinitely, looping while the daemon keeps
         reporting the operation as still running.
 
         Raises ``httpx.HTTPStatusError`` on non-2xx HTTP responses so
@@ -306,10 +320,10 @@ class BackendClient:
             # A non-terminal code (100 Created, 101 Started, 103 Running,
             # 105 Pending, ...) is positive proof the operation is still in
             # flight: the daemon's wait window elapsed before it finished.
-            # Give up once the overall deadline passes, reporting the
-            # still-running record; otherwise loop for another window.
+            # Signal the caller's overall deadline as a timeout; otherwise
+            # loop for another window.
             if deadline is not None and time.monotonic() >= deadline:
-                return record
+                raise BackendOperationTimeout(timeout)  # type: ignore[arg-type]
             # A daemon that returns the non-terminal code faster than the
             # requested window (ignoring ``?timeout=``) would spin the loop;
             # pad each poll out to a minimum interval to bound the rate.
