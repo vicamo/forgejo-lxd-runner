@@ -32,6 +32,13 @@ def test_create_launches_instance_from_label_arg(
     assert resp.environment_id == "job-1"
     assert resp.os == "Linux"
     assert resp.arch == "X64"
+    # POSIX shell semantics, fixed regardless of the reported OS.
+    assert resp.path_variable_name == "PATH"
+    assert resp.path_separator == ":"
+    assert resp.default_path_variable == (
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
+    assert resp.environment_case_insensitive is False
     # Registered in the internal map.
     assert "job-1" in service._envs  # noqa: SLF001
     mock_backend_client.get_instance.assert_called_once_with("job-1")

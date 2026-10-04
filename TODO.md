@@ -26,16 +26,6 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
 - [ ] `CreateRequest.cap_drop`: advisory Linux capability *drops*.
       Translate to `raw.lxc lxc.cap.drop` entries; symmetric handling
       to `cap_add`.
-- [ ] `CreateResponse.path_variable_name`: leave unset on Linux (runner
-      defaults to `"PATH"`); revisit only if a non-POSIX backend lands.
-      Belongs in *Deferred / rejected* until then.
-- [ ] `CreateResponse.default_path_variable`: leave unset; the runner's
-      fallback is the job-supplied `PATH`. Deferred until a backend
-      needs a specific default.
-- [ ] `CreateResponse.path_separator`: leave unset on Linux (runner
-      defaults to `":"`); deferred until a non-POSIX backend lands.
-- [ ] `CreateResponse.environment_case_insensitive`: leave unset (=
-      `false`); Linux env is case-sensitive. Deferred, same rationale.
 - [ ] `ExecRequest.user` (name form): `Exec` currently accepts only
       numeric UIDs and rejects names with `INVALID_ARGUMENT`. Resolve
       names via `getent passwd <name>` inside the instance (or
