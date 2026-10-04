@@ -411,6 +411,23 @@ class BackendClient:
 
         return self.call("GET", f"/1.0/instances/{name}/state", project=project)
 
+    def get_instance(
+        self,
+        name: str,
+        *,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the ``/1.0/instances/<name>`` record.
+
+        The instance record (as opposed to :meth:`get_instance_state`,
+        which reports runtime status) carries the daemon's static view of
+        the instance: its ``architecture``, ``config``, ``devices`` and
+        so on. A missing instance surfaces as ``httpx.HTTPStatusError``
+        (404) for the caller to map.
+        """
+
+        return self.call("GET", f"/1.0/instances/{name}", project=project)
+
     def set_instance_state(
         self,
         name: str,
