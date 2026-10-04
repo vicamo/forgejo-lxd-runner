@@ -159,6 +159,58 @@ def test_remove_without_a_container_touches_only_the_instance(
     mock_backend_client.remove_instance.assert_called_once_with("job-1")
 
 
+def test_remove_deletes_the_network_after_the_instance(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """The instance references the network, so it must go first."""
+    calls: list[str] = []
+    mock_backend_client.remove_instance.side_effect = lambda *a, **k: calls.append("instance")
+    mock_backend_client.remove_network.side_effect = lambda *a, **k: calls.append("network")
+    service._envs["job-1"] = _Env(  # noqa: SLF001
+        instance_name="job-1",
+        executor=HostExecutor(client=mock_backend_client, instance="job-1"),
+        network="flr-abc123",
+    )
+
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    assert calls == ["instance", "network"]
+    mock_backend_client.remove_network.assert_called_once_with("flr-abc123")
+    context.abort.assert_not_called()
+
+
+def test_remove_without_a_network_skips_the_network_call(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    registered: None,  # noqa: ARG001
+) -> None:
+    """An env that never got a network (empty name) deletes nothing extra."""
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    mock_backend_client.remove_network.assert_not_called()
+
+
+def test_remove_survives_a_network_delete_failure(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """The instance is already gone, so a stuck network must not fail Remove."""
+    mock_backend_client.remove_network.side_effect = httpx.ConnectError("boom")
+    service._envs["job-1"] = _Env(  # noqa: SLF001
+        instance_name="job-1",
+        executor=HostExecutor(client=mock_backend_client, instance="job-1"),
+        network="flr-abc123",
+    )
+
+    service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
+
+    context.abort.assert_not_called()
+
+
 def test_remove_tears_services_down_after_the_job_container(
     service: BackendPluginService, context: MagicMock, mock_backend_client: MagicMock
 ) -> None:
