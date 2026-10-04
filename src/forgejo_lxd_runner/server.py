@@ -9,10 +9,9 @@ Known simplifications, all called out in code:
 
 * ``CopyIn`` / ``CopyOut`` buffer the whole tar archive in memory. Fine
   for typical workflow payloads; a streaming rewrite is a later commit.
-* ``CreateResponse`` reports a hardcoded filesystem layout and a
-  hardcoded ``os=Linux``. The architecture is discovered from the LXD
-  instance record; deriving the OS from the image metadata, and exposing
-  the paths as backend options, are later commits.
+* ``CreateResponse`` reports a hardcoded filesystem layout; exposing the
+  paths as backend options is a later commit. The ``os`` and ``arch`` are
+  discovered from the LXD instance record.
 """
 
 from __future__ import annotations
@@ -121,6 +120,29 @@ def _lxd_arch_to_gha(lxd_arch: str) -> str:
     string for workflows that grew their own detection.
     """
     return _LXD_ARCH_TO_GHA.get(lxd_arch, lxd_arch)
+
+
+# Map LXD's ``image.os`` metadata property to GHA's ``RUNNER_OS`` /
+# ``runner.os`` value. GHA inherits its vocabulary from the .NET
+# ``System.Runtime.InteropServices.OSPlatform`` type (``Linux``, ``Windows``,
+# ``OSX``, ``FreeBSD``), matching what GitHub-hosted runners set.
+#
+# The set of non-Linux OSes LXD actually supports is tiny: FreeBSD (container
+# or VM) and Windows (VM only). Everything else is Linux, so we default to
+# that.
+_LXD_OS_TO_GHA: dict[str, str] = {
+    "freebsd": "FreeBSD",
+    "windows": "Windows",
+}
+
+
+def _lxd_os_to_gha(image_os: str) -> str:
+    """Translate LXD ``image.os`` to GHA's ``RUNNER_OS`` value.
+
+    Defaults to ``Linux`` -- the overwhelming majority of LXD images, and
+    the safe fallback when metadata is missing on custom images.
+    """
+    return _LXD_OS_TO_GHA.get(image_os.lower(), "Linux")
 
 
 class _Env:
@@ -441,15 +463,18 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
 
         # The instance record carries the architecture the daemon settled
-        # on, in LXD vocabulary; map it to GHA's RUNNER_ARCH. A failure
-        # here is an instance we cannot describe, so tear it down like any
-        # other post-launch failure.
+        # on and the image's ``image.os`` metadata; map them to GHA's
+        # RUNNER_ARCH / RUNNER_OS. A failure here is an instance we cannot
+        # describe, so tear it down like any other post-launch failure.
         try:
-            architecture = str(self._client.get_instance(name).get("architecture", ""))
+            metadata = self._client.get_instance(name)
         except (httpx.HTTPError, BackendOperationError) as exc:
             self._discard(name, network)
             context.abort(grpc.StatusCode.INTERNAL, f"lxd instance fetch: {exc}")
             raise AssertionError("unreachable") from exc
+        architecture = str(metadata.get("architecture", ""))
+        expanded = metadata.get("expanded_config") or {}
+        image_os = str(expanded.get("image.os", ""))
 
         with self._lock:
             self._envs[name] = _Env(
@@ -462,14 +487,14 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
         log.info("created environment %s from image %s on %s", name, image, executor)
 
-        # TODO: discover os and expose a knob for the paths.
+        # TODO: expose a knob for the paths.
         return plugin_pb2.CreateResponse(
             environment_id=name,
             root_path=_ROOT_PATH,
             act_path=_ACT_PATH,
             tool_cache_path=_TOOL_CACHE_PATH,
             temp_path=_TEMP_PATH,
-            os="Linux",
+            os=_lxd_os_to_gha(image_os),
             arch=_lxd_arch_to_gha(architecture),
         )
 
