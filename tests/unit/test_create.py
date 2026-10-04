@@ -286,6 +286,34 @@ def test_create_omits_profiles_when_effectively_empty(
     assert "profiles" not in config
 
 
+@pytest.mark.parametrize(
+    "instance_type", ["container", "virtual-machine", "unknown-type-passthrough"]
+)
+def test_create_passes_type(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    instance_type: str,
+) -> None:
+    """``type`` is forwarded verbatim; unknown values are LXD's to reject."""
+    service.Create(_req(backend_options={"type": instance_type}), context)
+
+    config = mock_backend_client.launch_instance.call_args.args[0]
+    assert config["type"] == instance_type
+
+
+def test_create_omits_type_when_option_absent(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """No ``type`` option -> no ``type`` key, so LXD defaults to a container."""
+    service.Create(_req(), context)
+
+    config = mock_backend_client.launch_instance.call_args.args[0]
+    assert "type" not in config
+
+
 def test_create_records_job_image(
     service: BackendPluginService,
     context: MagicMock,
