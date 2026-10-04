@@ -9,9 +9,10 @@ Known simplifications, all called out in code:
 
 * ``CopyIn`` / ``CopyOut`` buffer the whole tar archive in memory. Fine
   for typical workflow payloads; a streaming rewrite is a later commit.
-* ``CreateResponse`` reports a hardcoded filesystem layout and
-  ``os=Linux`` / ``arch=X64`` (the GHA ``RUNNER_OS`` / ``RUNNER_ARCH``
-  vocabulary). Discovery from the LXD image metadata is a later commit.
+* ``CreateResponse`` reports a hardcoded filesystem layout and a
+  hardcoded ``os=Linux``. The architecture is discovered from the LXD
+  instance record; deriving the OS from the image metadata, and exposing
+  the paths as backend options, are later commits.
 """
 
 from __future__ import annotations
@@ -69,6 +70,57 @@ _NETWORK_PREFIX = "flr-"
 def _network_name() -> str:
     """Return a fresh <=15-char name for a job's isolated bridge."""
     return f"{_NETWORK_PREFIX}{uuid.uuid4().hex[:10]}"
+
+
+# Map LXD architecture names (kernel / ``uname -m`` style) to the values GitHub
+# Actions exposes as ``RUNNER_ARCH`` and ``runner.arch``. GHA inherits its
+# vocabulary from the .NET ``System.Runtime.InteropServices.Architecture``
+# enum via the Azure Pipelines agent, so we map every value the enum defines
+# and pass everything else through untouched (best-effort -- LXD may run on
+# platforms .NET has no name for).
+#
+# .NET enum reference (all values across .NET versions):
+#   https://learn.microsoft.com/dotnet/api/system.runtime.interopservices.architecture
+# LXD architecture names come from ``shared/osarch/architectures.go``:
+#   https://github.com/canonical/lxd/blob/main/shared/osarch/architectures.go
+# GHA ``RUNNER_ARCH`` contract:
+#   https://docs.github.com/actions/learn-github-actions/variables#default-environment-variables
+_LXD_ARCH_TO_GHA: dict[str, str] = {
+    # .NET: X86 (Core 1.0) -- 32-bit x86
+    "i686": "X86",
+    "i386": "X86",
+    # .NET: X64 (Core 1.0) -- 64-bit x86 / amd64 / x86_64
+    "x86_64": "X64",
+    # .NET: Arm (Core 1.0) -- 32-bit ARMv7
+    "armv7l": "ARM",
+    # .NET: Armv6 (.NET 7) -- 32-bit ARMv6 (e.g. Raspberry Pi Zero). GHA has
+    # no separate token; RUNNER_ARCH lumps this under ARM.
+    "armv6l": "ARM",
+    # .NET: Arm64 (Core 3.0) -- 64-bit ARM / AArch64
+    "aarch64": "ARM64",
+    # .NET: S390x (.NET 6) -- IBM Z, big-endian
+    "s390x": "S390x",
+    # .NET: Ppc64le (.NET 7) -- 64-bit little-endian POWER
+    "ppc64le": "Ppc64le",
+    # .NET: LoongArch64 (.NET 7)
+    "loongarch64": "LoongArch64",
+    # .NET: RiscV64 (.NET 8)
+    "riscv64": "RiscV64",
+    # .NET: Wasm (.NET 5) -- WebAssembly. LXD never reports this, but included
+    # for completeness so the mapping mirrors the enum 1:1.
+    "wasm32": "Wasm",
+    "wasm64": "Wasm",
+}
+
+
+def _lxd_arch_to_gha(lxd_arch: str) -> str:
+    """Translate an LXD architecture string into GHA's ``RUNNER_ARCH`` value.
+
+    Unknown architectures pass through unchanged -- they still populate
+    ``RUNNER_ARCH`` and ``runner.arch``, which is more useful than an empty
+    string for workflows that grew their own detection.
+    """
+    return _LXD_ARCH_TO_GHA.get(lxd_arch, lxd_arch)
 
 
 class _Env:
@@ -388,6 +440,17 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             self._discard(name, network)
             context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
 
+        # The instance record carries the architecture the daemon settled
+        # on, in LXD vocabulary; map it to GHA's RUNNER_ARCH. A failure
+        # here is an instance we cannot describe, so tear it down like any
+        # other post-launch failure.
+        try:
+            architecture = str(self._client.get_instance(name).get("architecture", ""))
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            self._discard(name, network)
+            context.abort(grpc.StatusCode.INTERNAL, f"lxd instance fetch: {exc}")
+            raise AssertionError("unreachable") from exc
+
         with self._lock:
             self._envs[name] = _Env(
                 instance_name=name,
@@ -399,7 +462,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
         log.info("created environment %s from image %s on %s", name, image, executor)
 
-        # TODO: discover os/arch and expose a knob for the paths.
+        # TODO: discover os and expose a knob for the paths.
         return plugin_pb2.CreateResponse(
             environment_id=name,
             root_path=_ROOT_PATH,
@@ -407,7 +470,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             tool_cache_path=_TOOL_CACHE_PATH,
             temp_path=_TEMP_PATH,
             os="Linux",
-            arch="X64",
+            arch=_lxd_arch_to_gha(architecture),
         )
 
     def Start(  # noqa: N802
