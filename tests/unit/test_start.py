@@ -101,20 +101,25 @@ def test_start_maps_http_error_to_internal(
     assert excinfo.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
 
 
-def test_start_maps_operation_error_to_internal(
+def test_start_maps_operation_error_to_invalid_argument(
     service: BackendPluginService,
     context: MagicMock,
     mock_backend_client: MagicMock,
     registered: None,  # noqa: ARG001
     aborted: type[Exception],
 ) -> None:
-    """A daemon-side failure reading the state is an internal error."""
-    mock_backend_client.get_instance_state.side_effect = BackendOperationError("daemon is unwell")
+    """A ``BackendOperationError`` from LXD is a "the daemon said no" surface --
+    typically a bad image / config / conflict -- so it maps to
+    ``INVALID_ARGUMENT`` per the error-map policy, not ``INTERNAL``.
+    Locking the mapping in here so a future error-map tweak surfaces this
+    behaviour rather than silently changing the runner's retry decision.
+    """
+    mock_backend_client.get_instance_state.side_effect = BackendOperationError("daemon said no")
 
     with pytest.raises(aborted) as excinfo:
         _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
 
-    assert excinfo.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
+    assert excinfo.value.code == grpc.StatusCode.INVALID_ARGUMENT  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

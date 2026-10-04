@@ -48,6 +48,32 @@ _STATUS_RUNNING = 103
 # CopyOut yields the tar body in fixed-size gRPC chunks.
 _COPY_CHUNK_SIZE = 256 * 1024
 
+
+# REST -> gRPC status code mapping. Applied at every ``context.abort`` inside
+# an ``httpx.HTTPError`` / ``BackendOperationError`` catch. The runner uses
+# gRPC status to decide whether to retry vs surface to the workflow author --
+# reporting a user config mistake (unknown profile, typo'd project) as
+# INTERNAL turns a fast "fix your label" error into a retry loop, so give
+# each class of failure the status code it deserves.
+def _rest_error_to_grpc(exc: Exception) -> grpc.StatusCode:
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    if status is None and isinstance(exc, BackendOperationError):
+        # Async op failures are reported as ``status_code=400`` by the daemon.
+        status = 400
+    if status in (400, 409, 422):
+        # 400 bad request, 409 conflict (name already used), 422 unprocessable.
+        return grpc.StatusCode.INVALID_ARGUMENT
+    if status == 404:
+        # Missing project / profile / image / instance.
+        return grpc.StatusCode.NOT_FOUND
+    if status == 403:
+        # Client cert not trusted, project ACL denied, etc.
+        return grpc.StatusCode.PERMISSION_DENIED
+    # 500 and anything unclassified -- the plugin/LXD had a bad day.
+    return grpc.StatusCode.INTERNAL
+
+
 # The filesystem layout promised to Forgejo in ``CreateResponse``.
 # TODO: expose a knob for these paths.
 _ROOT_PATH = "/root/actions-runner"
@@ -443,7 +469,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 config={"ipv4.nat": "true", "ipv6.address": "none"},
             )
         except (httpx.HTTPError, BackendOperationError) as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd network create: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"lxd network create: {exc}")
             raise AssertionError("unreachable") from exc
 
         # ``start: true`` makes the daemon create *and* boot the instance in
@@ -484,7 +510,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             # The instance never came up, so nothing references the
             # network yet -- drop it so a failed Create leaves nothing.
             self._discard_network(network)
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd create {image!r}: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc
 
         # The instance is running by now, so the runtime inside it can
@@ -514,7 +540,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             context.abort(code, str(exc))
         except (httpx.HTTPError, BackendOperationError) as exc:
             self._discard(name, network)
-            context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"job container: {exc}")
 
         # The instance record carries the architecture the daemon settled
         # on and the image's ``image.os`` metadata; map them to GHA's
@@ -524,7 +550,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             metadata = self._client.get_instance(name)
         except (httpx.HTTPError, BackendOperationError) as exc:
             self._discard(name, network)
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd instance fetch: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"lxd instance fetch: {exc}")
             raise AssertionError("unreachable") from exc
         architecture = str(metadata.get("architecture", ""))
         expanded = metadata.get("expanded_config") or {}
@@ -572,7 +598,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         try:
             state = self._client.get_instance_state(name)
         except (httpx.HTTPError, BackendOperationError) as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd start: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"lxd start: {exc}")
         if state.get("status_code") != _STATUS_RUNNING:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
@@ -588,7 +614,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         except ExecutorError as exc:
             context.abort(grpc.StatusCode.INTERNAL, str(exc))
         except (httpx.HTTPError, BackendOperationError) as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"job container: {exc}")
 
         log.info("started environment %s on %s", request.environment_id, env.executor)
         yield plugin_pb2.StartOutput(
@@ -681,7 +707,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         except tarfile.TarError as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"CopyIn: bad tar: {exc}")
         except (httpx.HTTPError, BackendOperationError) as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"CopyIn: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"CopyIn: {exc}")
 
         return plugin_pb2.CopyInResponse()
 
@@ -735,7 +761,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             with tarfile.open(fileobj=buf, mode="w") as tar:
                 self._pull_into_tar(env.instance_name, src, tar, arcbase="")
         except (httpx.HTTPError, BackendOperationError) as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"CopyOut: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"CopyOut: {exc}")
 
         buf.seek(0)
         while True:
@@ -811,7 +837,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         try:
             self._client.remove_instance(name)
         except (httpx.HTTPError, BackendOperationError) as exc:
-            context.abort(grpc.StatusCode.INTERNAL, f"lxd remove: {exc}")
+            context.abort(_rest_error_to_grpc(exc), f"lxd remove: {exc}")
 
         # The instance is gone, so nothing references its network now;
         # delete it. A failure here must not fail Remove -- the instance,

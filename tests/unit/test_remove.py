@@ -68,26 +68,27 @@ def test_remove_env_is_dropped_before_client_call(
 
 
 @pytest.mark.parametrize(
-    "exc",
+    ("exc", "grpc_code"),
     [
-        httpx.ConnectError("boom"),
-        BackendOperationError("stop failed"),
+        (httpx.ConnectError("boom"), grpc.StatusCode.INTERNAL),
+        (BackendOperationError("stop failed"), grpc.StatusCode.INVALID_ARGUMENT),
     ],
 )
-def test_remove_maps_client_errors_to_internal(
+def test_remove_maps_client_errors_to_grpc_status(
     service: BackendPluginService,
     context: MagicMock,
     mock_backend_client: MagicMock,
     registered: None,  # noqa: ARG001
     aborted: type[Exception],
     exc: Exception,
+    grpc_code: grpc.StatusCode,
 ) -> None:
     mock_backend_client.remove_instance.side_effect = exc
 
     with pytest.raises(aborted) as excinfo:
         service.Remove(plugin_pb2.RemoveRequest(environment_id="job-1"), context)
 
-    assert excinfo.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
+    assert excinfo.value.code == grpc_code  # type: ignore[attr-defined]
 
 
 @pytest.fixture
