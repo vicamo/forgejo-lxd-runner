@@ -34,6 +34,52 @@ def test_create_launches_instance_from_label_arg(
     assert resp.arch == "X64"
     # Registered in the internal map.
     assert "job-1" in service._envs  # noqa: SLF001
+    mock_backend_client.get_instance.assert_called_once_with("job-1")
+
+
+@pytest.mark.parametrize(
+    ("reported_arch", "gha_arch"),
+    [
+        ("x86_64", "X64"),
+        ("aarch64", "ARM64"),
+        ("armv7l", "ARM"),
+        ("s390x", "S390x"),
+        ("ppc64le", "Ppc64le"),
+        ("riscv64", "RiscV64"),
+        # Unknown-to-us LXD string: echoed back verbatim in RUNNER_ARCH.
+        ("sparc64", "sparc64"),
+    ],
+)
+def test_create_reports_the_instance_architecture(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    reported_arch: str,
+    gha_arch: str,
+) -> None:
+    """arch comes from the instance record, mapped to GHA vocabulary."""
+    mock_backend_client.get_instance.return_value = {"architecture": reported_arch}
+
+    resp = service.Create(_req(), context)
+
+    assert resp.arch == gha_arch
+
+
+def test_create_discards_the_instance_when_the_arch_fetch_fails(
+    service: BackendPluginService,
+    context: MagicMock,
+    aborted: type[Exception],
+    mock_backend_client: MagicMock,
+) -> None:
+    """A record we can't read is an instance we can't describe: tear it down."""
+    mock_backend_client.get_instance.side_effect = httpx.HTTPError("boom")
+
+    with pytest.raises(aborted) as exc:
+        service.Create(_req(), context)
+
+    assert exc.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
+    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    assert "job-1" not in service._envs  # noqa: SLF001
 
 
 def test_create_gives_the_instance_its_own_isolated_network(

@@ -29,9 +29,6 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
 - [ ] `CreateResponse.os`: hard-coded to `"Linux"` today. Derive from
       `expanded_config["image.os"]` (or the image metadata) so the
       `RUNNER_OS` env var inside the job reflects the actual image.
-- [ ] `CreateResponse.arch`: hard-coded to `"X64"` today. Map
-      `metadata["architecture"]` through the GHA-canonical arch table
-      so `RUNNER_ARCH` reflects the real instance architecture.
 - [ ] `CreateResponse.path_variable_name`: leave unset on Linux (runner
       defaults to `"PATH"`); revisit only if a non-POSIX backend lands.
       Belongs in *Deferred / rejected* until then.

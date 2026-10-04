@@ -45,6 +45,10 @@ def mock_backend_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     real socket live under ``tests/e2e/``.
     """
     client = MagicMock(name="BackendClient()")
+    # Create reads the instance record for its architecture; default to a
+    # plausible x86_64 record so tests that don't care about arch need not
+    # wire it up. Tests that do assert on arch override this per-case.
+    client.get_instance.return_value = {"architecture": "x86_64"}
     factory = MagicMock(name="BackendClient", return_value=client)
     monkeypatch.setattr("forgejo_lxd_runner.server.BackendClient", factory)
     return client
