@@ -389,6 +389,39 @@ def test_get_instance_state_raises_for_unknown_name(client: BackendClient) -> No
 
 
 # ---------------------------------------------------------------------------
+# get_instance — the static instance record, source of CreateResponse.arch
+
+
+def test_get_instance_reports_architecture(client: BackendClient) -> None:
+    """The instance record carries the daemon's architecture for the instance.
+
+    This is the field the server maps to GHA's ``RUNNER_ARCH``. A
+    ``source.type=none`` instance is enough: the record exists without
+    any image pull, and the daemon still stamps it with the host's
+    architecture.
+    """
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    try:
+        client.launch_instance({"name": name, "source": {"type": "none"}}, timeout=30.0)
+
+        record = client.get_instance(name)
+        assert record.get("name") == name
+        # Every LXD/Incus instance record carries a non-empty architecture
+        # in the daemon's own vocabulary (e.g. x86_64, aarch64).
+        assert record.get("architecture")
+    finally:
+        _delete_instance(client, name)
+
+
+def test_get_instance_raises_for_unknown_name(client: BackendClient) -> None:
+    """Unknown instance names yield HTTP 404 → httpx.HTTPStatusError."""
+    name = f"forgejo-e2e-missing-{uuid.uuid4().hex[:10]}"
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        client.get_instance(name)
+    assert excinfo.value.response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # exec_stream — needs a running instance, so we reuse the tiny-image helper.
 
 
