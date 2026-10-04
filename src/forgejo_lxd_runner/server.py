@@ -22,6 +22,7 @@ import logging
 import os
 import tarfile
 import threading
+import uuid
 from collections.abc import Iterator
 
 import grpc
@@ -58,6 +59,17 @@ _TEMP_PATH = "/tmp"
 #: above stays true inside it and CopyIn/CopyOut need no translation.
 _JOB_CONTAINER_MOUNTS = (_ROOT_PATH, _TOOL_CACHE_PATH, _TEMP_PATH)
 
+#: Prefix for a job's per-instance network. A bridge network's name
+#: becomes the host's Linux bridge interface, capped at 15 characters,
+#: so the name is this prefix plus 10 hex digits of randomness (14
+#: total) rather than the much longer instance name.
+_NETWORK_PREFIX = "flr-"
+
+
+def _network_name() -> str:
+    """Return a fresh <=15-char name for a job's isolated bridge."""
+    return f"{_NETWORK_PREFIX}{uuid.uuid4().hex[:10]}"
+
 
 class _Env:
     """Per-environment state tracked by the plugin.
@@ -82,7 +94,7 @@ class _Env:
     respond by issuing ``Remove`` for that ``environment_id``.
     """
 
-    __slots__ = ("executor", "instance_name", "job_image", "services")
+    __slots__ = ("executor", "instance_name", "job_image", "network", "services")
 
     def __init__(
         self,
@@ -90,6 +102,7 @@ class _Env:
         executor: Executor,
         job_image: str = "",
         services: ServiceSet | None = None,
+        network: str = "",
     ) -> None:
         self.instance_name = instance_name
         #: The workflow's ``container.image``, empty when the job has no
@@ -109,6 +122,10 @@ class _Env:
         #: ``Remove`` can tear them down: they outlive every other RPC,
         #: since a step may connect to one at any point.
         self.services = services
+        #: The job's own managed bridge, created by ``Create`` so the
+        #: instance cannot reach any other job's. Kept so ``Remove`` can
+        #: delete it once the instance that used it is gone.
+        self.network = network
 
 
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
@@ -234,19 +251,37 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 read[key] = value
         return read
 
-    def _discard(self, name: str) -> None:
-        """Delete an instance Create is about to abandon.
+    def _discard(self, name: str, network: str) -> None:
+        """Delete an instance Create is about to abandon, and its network.
 
         Best-effort on purpose: the caller is already failing and the
         gRPC error it is about to raise describes the real problem.
         Letting a cleanup error replace it would hide the cause, so a
         failure here is logged and swallowed -- an instance that outlives
         a failed Create is a smaller problem than an unreportable one.
+
+        The instance goes first: the network cannot be deleted while the
+        instance still references it.
         """
         try:
             self._client.remove_instance(name)
         except (httpx.HTTPError, BackendOperationError):
             log.exception("failed to remove instance %s after a failed Create", name)
+        self._discard_network(network)
+
+    def _discard_network(self, network: str) -> None:
+        """Delete a job's network, best-effort, logging any failure.
+
+        Split from :meth:`_discard` because a launch that never created
+        the instance still has a network to reclaim. An empty name means
+        no network was ever created, so there is nothing to reclaim.
+        """
+        if not network:
+            return
+        try:
+            self._client.remove_network(network)
+        except (httpx.HTTPError, BackendOperationError):
+            log.exception("failed to remove network %s", network)
 
     # ------------------------------------------------------------------
     # BackendPlugin RPCs
@@ -277,6 +312,22 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if not name:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
 
+        # Every job gets its own bridge so one job's instance cannot
+        # reach another's -- isolation is the instance's network, not
+        # anything inside it. NAT stays on so package installs at boot
+        # still work; IPv6 is turned off to avoid the AAAA-timeout trap
+        # an unroutable ULA causes (see examples/profiles/base.yaml).
+        network = _network_name()
+        try:
+            self._client.create_network(
+                network,
+                description=f"forgejo-lxd-runner job {name}",
+                config={"ipv4.nat": "true", "ipv6.address": "none"},
+            )
+        except (httpx.HTTPError, BackendOperationError) as exc:
+            context.abort(grpc.StatusCode.INTERNAL, f"lxd network create: {exc}")
+            raise AssertionError("unreachable") from exc
+
         # ``start: true`` makes the daemon create *and* boot the instance in
         # a single operation. Create is the runner's ``docker create``: it
         # must leave behind an environment every later RPC can talk to, and
@@ -286,6 +337,9 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             "name": name,
             "source": {"type": "image", "alias": image},
             "start": True,
+            # Put the instance's NIC on its own network, overriding any
+            # ``eth0`` an applied profile supplies.
+            "devices": {"eth0": {"type": "nic", "network": network}},
         }
         # ``profiles`` backend option: comma-separated list of LXD profile
         # names to apply. Absent (or empty after parsing) -> LXD applies the
@@ -299,6 +353,9 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         try:
             self._client.launch_instance(config)
         except (httpx.HTTPError, BackendOperationError) as exc:
+            # The instance never came up, so nothing references the
+            # network yet -- drop it so a failed Create leaves nothing.
+            self._discard_network(network)
             context.abort(grpc.StatusCode.INTERNAL, f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc
 
@@ -318,7 +375,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 network=services.network if services else "",
             )
         except ExecutorError as exc:
-            self._discard(name)
+            self._discard(name, network)
             # A missing runtime is the operator's to fix in the Forgejo
             # config; an unresolvable image is the workflow's.
             code = (
@@ -328,7 +385,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             )
             context.abort(code, str(exc))
         except (httpx.HTTPError, BackendOperationError) as exc:
-            self._discard(name)
+            self._discard(name, network)
             context.abort(grpc.StatusCode.INTERNAL, f"job container: {exc}")
 
         with self._lock:
@@ -337,6 +394,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 executor=executor,
                 job_image=request.image,
                 services=services,
+                network=network,
             )
 
         log.info("created environment %s from image %s on %s", name, image, executor)
@@ -609,6 +667,13 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             self._client.remove_instance(name)
         except (httpx.HTTPError, BackendOperationError) as exc:
             context.abort(grpc.StatusCode.INTERNAL, f"lxd remove: {exc}")
+
+        # The instance is gone, so nothing references its network now;
+        # delete it. A failure here must not fail Remove -- the instance,
+        # the thing Forgejo cares about, is already gone -- so it is
+        # logged rather than raised. An env injected without a network
+        # (e.g. a test) has an empty name, which is a no-op.
+        self._discard_network(env.network)
 
         log.info("removed environment %s", env_id)
         return plugin_pb2.RemoveResponse()

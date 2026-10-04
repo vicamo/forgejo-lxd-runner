@@ -25,18 +25,70 @@ def test_create_launches_instance_from_label_arg(
 ) -> None:
     resp = service.Create(_req(), context)
 
-    mock_backend_client.launch_instance.assert_called_once_with(
-        {
-            "name": "job-1",
-            "source": {"type": "image", "alias": "ubuntu:24.04"},
-            "start": True,
-        },
-    )
+    payload = mock_backend_client.launch_instance.call_args.args[0]
+    assert payload["name"] == "job-1"
+    assert payload["source"] == {"type": "image", "alias": "ubuntu:24.04"}
+    assert payload["start"] is True
     assert resp.environment_id == "job-1"
     assert resp.os == "Linux"
     assert resp.arch == "X64"
     # Registered in the internal map.
     assert "job-1" in service._envs  # noqa: SLF001
+
+
+def test_create_gives_the_instance_its_own_isolated_network(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """Every job gets a NAT'd bridge of its own, and the NIC rides it."""
+    service.Create(_req(), context)
+
+    net = mock_backend_client.create_network.call_args
+    name = net.args[0]
+    # A bridge name is the host interface name: <=15 chars.
+    assert name.startswith("flr-")
+    assert len(name) <= 15
+    assert net.kwargs["config"] == {"ipv4.nat": "true", "ipv6.address": "none"}
+
+    payload = mock_backend_client.launch_instance.call_args.args[0]
+    assert payload["devices"] == {"eth0": {"type": "nic", "network": name}}
+    # The name is remembered for Remove to reclaim.
+    assert service._envs["job-1"].network == name  # noqa: SLF001
+
+
+def test_create_before_the_network_is_not_cleaned_up(
+    service: BackendPluginService,
+    context: MagicMock,
+    aborted: type[Exception],
+    mock_backend_client: MagicMock,
+) -> None:
+    """A network-create failure aborts before anything exists to reclaim."""
+    mock_backend_client.create_network.side_effect = httpx.HTTPError("boom")
+
+    with pytest.raises(aborted) as exc:
+        service.Create(_req(), context)
+
+    assert exc.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
+    mock_backend_client.launch_instance.assert_not_called()
+    mock_backend_client.remove_network.assert_not_called()
+
+
+def test_create_reclaims_the_network_when_the_launch_fails(
+    service: BackendPluginService,
+    context: MagicMock,
+    aborted: type[Exception],
+    mock_backend_client: MagicMock,
+) -> None:
+    """The launch never referenced the network, so Create drops it."""
+    mock_backend_client.launch_instance.side_effect = httpx.HTTPError("boom")
+
+    with pytest.raises(aborted):
+        service.Create(_req(), context)
+
+    name = mock_backend_client.create_network.call_args.args[0]
+    mock_backend_client.remove_network.assert_called_once_with(name)
+    assert "job-1" not in service._envs  # noqa: SLF001
 
 
 def test_create_rejects_empty_label_arg(
