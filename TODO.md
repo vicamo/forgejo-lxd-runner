@@ -26,9 +26,6 @@ the LXD REST call it maps to (or documents why it's a no-op on LXD).
 - [ ] `CreateRequest.cap_drop`: advisory Linux capability *drops*.
       Translate to `raw.lxc lxc.cap.drop` entries; symmetric handling
       to `cap_add`.
-- [ ] `CreateResponse.os`: hard-coded to `"Linux"` today. Derive from
-      `expanded_config["image.os"]` (or the image metadata) so the
-      `RUNNER_OS` env var inside the job reflects the actual image.
 - [ ] `CreateResponse.path_variable_name`: leave unset on Linux (runner
       defaults to `"PATH"`); revisit only if a non-POSIX backend lands.
       Belongs in *Deferred / rejected* until then.

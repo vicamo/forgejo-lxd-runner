@@ -58,11 +58,42 @@ def test_create_reports_the_instance_architecture(
     gha_arch: str,
 ) -> None:
     """arch comes from the instance record, mapped to GHA vocabulary."""
-    mock_backend_client.get_instance.return_value = {"architecture": reported_arch}
+    mock_backend_client.get_instance.return_value = {
+        "architecture": reported_arch,
+        "expanded_config": {"image.os": "ubuntu"},
+    }
 
     resp = service.Create(_req(), context)
 
     assert resp.arch == gha_arch
+
+
+@pytest.mark.parametrize(
+    ("image_os", "gha_os"),
+    [
+        ("ubuntu", "Linux"),
+        ("freebsd", "FreeBSD"),
+        ("windows", "Windows"),
+        # Missing metadata defaults to Linux.
+        ("", "Linux"),
+    ],
+)
+def test_create_reports_the_instance_os(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    image_os: str,
+    gha_os: str,
+) -> None:
+    """os comes from the image.os metadata, mapped to GHA vocabulary."""
+    mock_backend_client.get_instance.return_value = {
+        "architecture": "x86_64",
+        "expanded_config": {"image.os": image_os} if image_os else {},
+    }
+
+    resp = service.Create(_req(), context)
+
+    assert resp.os == gha_os
 
 
 def test_create_discards_the_instance_when_the_arch_fetch_fails(

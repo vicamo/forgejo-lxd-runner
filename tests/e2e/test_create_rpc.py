@@ -13,9 +13,9 @@ here we instead alias an image already cached on the host, so the test
 needs no network egress and no image pull. The module skips when the
 host has no cached container image to alias.
 
-This is the only test that observes ``CreateResponse.arch`` over the
-full stack -- every other tier reads the raw instance record or mocks
-the client.
+These are the only tests that observe ``CreateResponse.arch`` and
+``CreateResponse.os`` over the full stack -- every other tier reads the
+raw instance record or mocks the client.
 
 Skipped when no daemon socket is autodetected.
 """
@@ -161,3 +161,17 @@ def test_create_reports_architecture(
     """
     with _created(plugin_stub, real_client, local_image) as resp:
         assert resp.arch in _GHA_ARCH, f"unexpected RUNNER_ARCH token {resp.arch!r}"
+
+
+def test_create_reports_os(
+    plugin_stub: plugin_pb2_grpc.BackendPluginStub,
+    real_client: BackendClient,
+    local_image: str,
+) -> None:
+    """Create populates CreateResponse.os from the image metadata.
+
+    The cached image is a Linux container image, so its ``image.os``
+    maps to GHA's ``Linux``. This is the field RUNNER_OS reads.
+    """
+    with _created(plugin_stub, real_client, local_image) as resp:
+        assert resp.os == "Linux", f"unexpected RUNNER_OS {resp.os!r}"
