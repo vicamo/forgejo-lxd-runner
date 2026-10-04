@@ -809,3 +809,128 @@ def test_remove_profile_raises_while_an_instance_references_it(
         _delete_instance(client, instance)
         with contextlib.suppress(Exception):
             client.remove_profile(profile)
+
+
+# ---------------------------------------------------------------------------
+# create_network / remove_network
+#
+# A bridge's name is the host's Linux interface name, capped at 15 chars,
+# so these tests use a short ``flr-e2e-`` + 6 hex = 14-char name.
+
+
+def _network_name() -> str:
+    """A fresh managed-bridge name within the 15-char host-ifname limit."""
+    return f"flr-e2e-{uuid.uuid4().hex[:6]}"
+
+
+def test_create_network_registers_config(client: BackendClient) -> None:
+    """A created bridge reads back with the config we sent and type bridge."""
+    name = _network_name()
+
+    try:
+        client.create_network(
+            name,
+            description="forgejo-lxd-runner e2e",
+            config={"ipv4.nat": "true", "ipv6.address": "none"},
+        )
+
+        meta = client.call("GET", f"/1.0/networks/{name}")
+        assert meta.get("name") == name
+        assert meta.get("description") == "forgejo-lxd-runner e2e"
+        # Type defaults to bridge when unspecified — the whole point of a
+        # NAT'd per-job network.
+        assert meta.get("type") == "bridge"
+        cfg = meta.get("config") or {}
+        assert cfg.get("ipv4.nat") == "true"
+        assert cfg.get("ipv6.address") == "none"
+    finally:
+        with contextlib.suppress(Exception):
+            client.remove_network(name)
+
+
+def test_create_network_with_name_only_leaves_daemon_defaults(
+    client: BackendClient,
+) -> None:
+    """Omitted fields are the daemon's call — it picks a subnet and NAT itself.
+
+    This is the ``let the implementation decide the default`` contract:
+    we send nothing but the name, and the daemon still materialises a
+    usable bridge with its own ``ipv4.address``/``ipv4.nat``.
+    """
+    name = _network_name()
+
+    try:
+        client.create_network(name)
+
+        meta = client.call("GET", f"/1.0/networks/{name}")
+        assert meta.get("name") == name
+        assert meta.get("type") == "bridge"
+        # The daemon fills ipv4.address with a free subnet rather than
+        # leaving it blank.
+        assert (meta.get("config") or {}).get("ipv4.address")
+    finally:
+        with contextlib.suppress(Exception):
+            client.remove_network(name)
+
+
+def test_create_network_rejects_duplicate_name(client: BackendClient) -> None:
+    """A second create with the same name is refused as an HTTP error."""
+    name = _network_name()
+
+    try:
+        client.create_network(name)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.create_network(name)
+    finally:
+        with contextlib.suppress(Exception):
+            client.remove_network(name)
+
+
+def test_remove_network_deletes_an_existing_network(client: BackendClient) -> None:
+    name = _network_name()
+    client.create_network(name, config={"ipv4.nat": "true"})
+
+    client.remove_network(name)
+
+    resp = client.request("GET", f"/1.0/networks/{name}")
+    assert resp.status_code == 404
+
+
+def test_remove_network_is_idempotent_on_missing_name(client: BackendClient) -> None:
+    """Removing a network that never existed is a no-op, not a 404 raise."""
+    name = _network_name()
+    assert client.remove_network(name) is None
+
+
+def test_remove_network_raises_while_an_instance_references_it(
+    client: BackendClient,
+) -> None:
+    """The daemon refuses to delete an in-use network; we surface that.
+
+    Mirrors the per-job lifecycle: Create attaches the instance's NIC to
+    the bridge, so the bridge cannot be deleted until the instance is
+    gone — exactly why Remove deletes the instance first.
+    """
+    name = _network_name()
+    instance = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    client.create_network(name, config={"ipv4.nat": "true", "ipv6.address": "none"})
+
+    try:
+        # A stopped source.type=none instance is enough to hold a
+        # reference on the network — no image pull needed.
+        client.launch_instance(
+            {
+                "name": instance,
+                "source": {"type": "none"},
+                "devices": {"eth0": {"type": "nic", "network": name}},
+            },
+            timeout=30.0,
+        )
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.remove_network(name)
+    finally:
+        _delete_instance(client, instance)
+        with contextlib.suppress(Exception):
+            client.remove_network(name)

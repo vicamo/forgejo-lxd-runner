@@ -480,6 +480,58 @@ class BackendClient:
         resp.raise_for_status()
 
     # ------------------------------------------------------------------
+    # Networks
+
+    def create_network(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        config: dict[str, str] | None = None,
+        project: str | None = None,
+    ) -> None:
+        """Create managed network ``name`` on the daemon.
+
+        ``POST /1.0/networks`` is synchronous on both LXD and Incus — no
+        operation to wait on — so this goes through :meth:`call` like
+        :meth:`create_profile`. Only the keys the caller supplies are
+        sent; the daemon fills in the rest (type defaults to ``bridge``,
+        ``ipv4.address`` to a free subnet, and so on). A duplicate name
+        surfaces as ``httpx.HTTPStatusError`` (409) for the caller to map.
+
+        A bridge network's name becomes the host's Linux bridge
+        interface name, so it is capped at 15 characters — the caller
+        picks a short name, not this method's concern.
+        """
+
+        payload: dict[str, Any] = {"name": name}
+        if description is not None:
+            payload["description"] = description
+        if config is not None:
+            payload["config"] = config
+        self.call("POST", "/1.0/networks", project=project, json=payload)
+
+    def remove_network(
+        self,
+        name: str,
+        *,
+        project: str | None = None,
+    ) -> None:
+        """Remove managed network ``name``, tolerating "already gone".
+
+        Mirrors :meth:`remove_profile`'s contract: the post-condition is
+        ``network <name> does not exist in <project>``, which a 404
+        already satisfies. Every other status still raises. The daemon
+        refuses to delete a network instances still use — that surfaces
+        as a 400 and is the caller's problem.
+        """
+
+        resp = self.request("DELETE", f"/1.0/networks/{name}", project=project)
+        if resp.status_code == 404:
+            return
+        resp.raise_for_status()
+
+    # ------------------------------------------------------------------
     # Exec streaming
 
     def exec_capture(
