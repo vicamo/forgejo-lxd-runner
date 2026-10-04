@@ -527,6 +527,8 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 workdir=_ROOT_PATH,
                 mounts=mount_specs(list(_JOB_CONTAINER_MOUNTS)),
                 network=services.network if services else "",
+                cap_add=list(request.cap_add),
+                cap_drop=list(request.cap_drop),
             )
         except ExecutorError as exc:
             self._discard(name, network)
