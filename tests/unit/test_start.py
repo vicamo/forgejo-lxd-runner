@@ -42,7 +42,7 @@ def test_start_accepts_running_instance(
 
     outs = _drain(service.Start(plugin_pb2.StartRequest(environment_id="job-1"), context))
 
-    mock_backend_client.get_instance_state.assert_called_once_with("job-1")
+    mock_backend_client.get_instance_state.assert_called_once_with("job-1", project=None)
     assert len(outs) == 1
     assert outs[0].WhichOneof("Output") == "start_complete"
     context.abort.assert_not_called()

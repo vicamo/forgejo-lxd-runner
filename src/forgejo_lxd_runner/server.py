@@ -2,8 +2,10 @@
 
 Commit 1 (MVP): the plugin respects only ``CreateRequest.label_arg`` (the
 image reference) and lets the daemon supply every other default —
-project, profile, user, network, storage. Later commits add options one
-at a time.
+profile, user, network, storage. Later commits add options one
+at a time. The ``project`` backend option, when set, scopes an
+environment's instance, exec and file calls to a named LXD project;
+unset, the daemon's default project is used.
 
 Known simplifications, all called out in code:
 
@@ -205,7 +207,7 @@ class _Env:
     respond by issuing ``Remove`` for that ``environment_id``.
     """
 
-    __slots__ = ("executor", "instance_name", "job_image", "network", "services")
+    __slots__ = ("executor", "instance_name", "job_image", "network", "project", "services")
 
     def __init__(
         self,
@@ -214,6 +216,7 @@ class _Env:
         job_image: str = "",
         services: ServiceSet | None = None,
         network: str = "",
+        project: str | None = None,
     ) -> None:
         self.instance_name = instance_name
         #: The workflow's ``container.image``, empty when the job has no
@@ -237,6 +240,10 @@ class _Env:
         #: instance cannot reach any other job's. Kept so ``Remove`` can
         #: delete it once the instance that used it is gone.
         self.network = network
+        #: The LXD project this instance lives in, or ``None`` for the
+        #: daemon's default. Stored at ``Create`` so every later RPC
+        #: scopes its instance, exec and file calls to the same project.
+        self.project = project
 
 
 class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
@@ -314,6 +321,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         name: str,
         executor: Executor,
         requested: list[plugin_pb2.ServiceContainer],
+        project: str | None = None,
     ) -> ServiceSet | None:
         """Bring a job's ``services:`` up, or return ``None`` if it has none.
 
@@ -346,6 +354,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             instance=name,
             runtime=executor.runtime,
             network=name if isinstance(executor, ContainerExecutor) else "",
+            project=project,
         )
         services.create(
             [
@@ -381,6 +390,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 environment=environment,
                 user=user,
                 cwd=cwd,
+                project=env.project,
             )
         except (httpx.HTTPError, BackendOperationError):
             log.exception("failed to read the environment of %s", env.instance_name)
@@ -395,7 +405,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 read[key] = value
         return read
 
-    def _discard(self, name: str, network: str) -> None:
+    def _discard(self, name: str, network: str, project: str | None = None) -> None:
         """Delete an instance Create is about to abandon, and its network.
 
         Best-effort on purpose: the caller is already failing and the
@@ -408,12 +418,12 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         instance still references it.
         """
         try:
-            self._client.remove_instance(name)
+            self._client.remove_instance(name, project=project)
         except (httpx.HTTPError, BackendOperationError):
             log.exception("failed to remove instance %s after a failed Create", name)
-        self._discard_network(network)
+        self._discard_network(network, project=project)
 
-    def _discard_network(self, network: str) -> None:
+    def _discard_network(self, network: str, project: str | None = None) -> None:
         """Delete a job's network, best-effort, logging any failure.
 
         Split from :meth:`_discard` because a launch that never created
@@ -423,7 +433,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if not network:
             return
         try:
-            self._client.remove_network(network)
+            self._client.remove_network(network, project=project)
         except (httpx.HTTPError, BackendOperationError):
             log.exception("failed to remove network %s", network)
 
@@ -456,6 +466,13 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if not name:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
 
+        # ``project`` backend option: create the instance, its network and
+        # everything else this environment owns inside the named LXD project
+        # (per-tenant quotas, ACLs, isolation). Absent -> ``None``, and the
+        # daemon uses its ``default`` project. Stored on the env so every
+        # later RPC scopes its calls to the same project.
+        project = request.backend_options.get("project") or None
+
         # Every job gets its own bridge so one job's instance cannot
         # reach another's -- isolation is the instance's network, not
         # anything inside it. NAT stays on so package installs at boot
@@ -467,6 +484,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 network,
                 description=f"forgejo-lxd-runner job {name}",
                 config={"ipv4.nat": "true", "ipv6.address": "none"},
+                project=project,
             )
         except (httpx.HTTPError, BackendOperationError) as exc:
             context.abort(_rest_error_to_grpc(exc), f"lxd network create: {exc}")
@@ -495,12 +513,14 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         if profiles:
             config["profiles"] = profiles
         try:
-            self._client.launch_instance(config, timeout=self._effective_create_timeout(request))
+            self._client.launch_instance(
+                config, timeout=self._effective_create_timeout(request), project=project
+            )
         except BackendOperationTimeout as exc:
             # LXD may have created (and even started) the instance while
             # we timed out waiting. Best-effort delete keeps the host
             # from accumulating orphans; the runner is already aborting.
-            self._discard(name, network)
+            self._discard(name, network, project=project)
             context.abort(
                 grpc.StatusCode.DEADLINE_EXCEEDED,
                 f"lxd create {image!r} exceeded {exc.timeout}s",
@@ -509,7 +529,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         except (httpx.HTTPError, BackendOperationError) as exc:
             # The instance never came up, so nothing references the
             # network yet -- drop it so a failed Create leaves nothing.
-            self._discard_network(network)
+            self._discard_network(network, project=project)
             context.abort(_rest_error_to_grpc(exc), f"lxd create {image!r}: {exc}")
             raise AssertionError("unreachable") from exc
 
@@ -520,8 +540,8 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # know there is anything to Remove, and the instance would be
         # left behind for an operator to find.
         try:
-            executor = resolve(self._client, name, request.image)
-            services = self._start_services(name, executor, list(request.services))
+            executor = resolve(self._client, name, request.image, project=project)
+            services = self._start_services(name, executor, list(request.services), project=project)
             executor.create(
                 f"{name}-job",
                 workdir=_ROOT_PATH,
@@ -531,7 +551,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 cap_drop=list(request.cap_drop),
             )
         except ExecutorError as exc:
-            self._discard(name, network)
+            self._discard(name, network, project=project)
             # A missing runtime is the operator's to fix in the Forgejo
             # config; an unresolvable image is the workflow's.
             code = (
@@ -541,7 +561,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             )
             context.abort(code, str(exc))
         except (httpx.HTTPError, BackendOperationError) as exc:
-            self._discard(name, network)
+            self._discard(name, network, project=project)
             context.abort(_rest_error_to_grpc(exc), f"job container: {exc}")
 
         # The instance record carries the architecture the daemon settled
@@ -549,9 +569,9 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # RUNNER_ARCH / RUNNER_OS. A failure here is an instance we cannot
         # describe, so tear it down like any other post-launch failure.
         try:
-            metadata = self._client.get_instance(name)
+            metadata = self._client.get_instance(name, project=project)
         except (httpx.HTTPError, BackendOperationError) as exc:
-            self._discard(name, network)
+            self._discard(name, network, project=project)
             context.abort(_rest_error_to_grpc(exc), f"lxd instance fetch: {exc}")
             raise AssertionError("unreachable") from exc
         architecture = str(metadata.get("architecture", ""))
@@ -565,6 +585,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 job_image=request.image,
                 services=services,
                 network=network,
+                project=project,
             )
 
         log.info("created environment %s from image %s on %s", name, image, executor)
@@ -591,6 +612,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
     ) -> Iterator[plugin_pb2.StartOutput]:
         env = self._lookup(context, request.environment_id)
         name = env.instance_name
+        project = env.project
         # Create launches the instance with ``start: true``, so by the
         # time Forgejo calls Start there is nothing left to bring up —
         # this is the ``docker start`` of an already-running container.
@@ -598,7 +620,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # and fail loudly if it is not, rather than letting the first
         # Exec report a confusing error.
         try:
-            state = self._client.get_instance_state(name)
+            state = self._client.get_instance_state(name, project=project)
         except (httpx.HTTPError, BackendOperationError) as exc:
             context.abort(_rest_error_to_grpc(exc), f"lxd start: {exc}")
         if state.get("status_code") != _STATUS_RUNNING:
@@ -656,6 +678,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 environment=environ,
                 user=uid,
                 cwd=cwd,
+                project=env.project,
             ):
                 if kind == "exit":
                     yield plugin_pb2.ExecOutput(
@@ -705,7 +728,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
         try:
             with tarfile.open(fileobj=buf, mode="r|*") as tar:
-                self._push_tar(env.instance_name, dest_path, tar)
+                self._push_tar(env.instance_name, dest_path, tar, project=env.project)
         except tarfile.TarError as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"CopyIn: bad tar: {exc}")
         except (httpx.HTTPError, BackendOperationError) as exc:
@@ -713,7 +736,14 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
 
         return plugin_pb2.CopyInResponse()
 
-    def _push_tar(self, instance: str, dest_path: str, tar: tarfile.TarFile) -> None:
+    def _push_tar(
+        self,
+        instance: str,
+        dest_path: str,
+        tar: tarfile.TarFile,
+        *,
+        project: str | None = None,
+    ) -> None:
         """Walk ``tar`` and replay each entry onto ``instance:dest_path``.
 
         Directories become ``X-*-type: directory`` POSTs, files carry
@@ -728,27 +758,29 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # instance has nothing under ``/root`` yet. Existing levels are
         # harmless to re-push, so walk top-down unconditionally rather
         # than probing each one first.
-        self._push_directory_p(instance, dest_path)
+        self._push_directory_p(instance, dest_path, project=project)
 
         for member in tar:
             # ``member.name`` is a relative path inside the tarball.
             target = os.path.join(dest_path, member.name).replace(os.sep, "/")
             if member.isdir():
-                self._client.push_directory(instance, target)
+                self._client.push_directory(instance, target, project=project)
             elif member.isfile():
                 extracted = tar.extractfile(member)
                 data = extracted.read() if extracted is not None else b""
-                self._client.push_file(instance, target, data, mode=member.mode or 0o644)
+                self._client.push_file(
+                    instance, target, data, mode=member.mode or 0o644, project=project
+                )
             elif member.issym():
-                self._client.push_symlink(instance, target, member.linkname)
+                self._client.push_symlink(instance, target, member.linkname, project=project)
             # Anything else (block/char/fifo/hardlink) is silently skipped.
 
-    def _push_directory_p(self, instance: str, path: str) -> None:
+    def _push_directory_p(self, instance: str, path: str, *, project: str | None = None) -> None:
         """Create ``path`` and any missing parents, ``mkdir -p`` style."""
 
         parts = [p for p in path.strip("/").split("/") if p]
         for i in range(len(parts)):
-            self._client.push_directory(instance, "/" + "/".join(parts[: i + 1]))
+            self._client.push_directory(instance, "/" + "/".join(parts[: i + 1]), project=project)
 
     def CopyOut(  # noqa: N802
         self,
@@ -761,7 +793,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         buf = io.BytesIO()
         try:
             with tarfile.open(fileobj=buf, mode="w") as tar:
-                self._pull_into_tar(env.instance_name, src, tar, arcbase="")
+                self._pull_into_tar(env.instance_name, src, tar, arcbase="", project=env.project)
         except (httpx.HTTPError, BackendOperationError) as exc:
             context.abort(_rest_error_to_grpc(exc), f"CopyOut: {exc}")
 
@@ -772,7 +804,15 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 break
             yield plugin_pb2.CopyOutChunk(data=data)
 
-    def _pull_into_tar(self, instance: str, src: str, tar: tarfile.TarFile, arcbase: str) -> None:
+    def _pull_into_tar(
+        self,
+        instance: str,
+        src: str,
+        tar: tarfile.TarFile,
+        arcbase: str,
+        *,
+        project: str | None = None,
+    ) -> None:
         """Recursively fetch ``src`` from ``instance`` and append to ``tar``.
 
         Directory listings come back as JSON arrays; files and symlinks
@@ -781,7 +821,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         classifies an entry and fetches it — no separate stat round-trip.
         """
 
-        kind, data, mode = self._client.pull_file(instance, src)
+        kind, data, mode = self._client.pull_file(instance, src, project=project)
         base = os.path.basename(src.rstrip("/")) or src
         arcname = os.path.join(arcbase, base).replace(os.sep, "/") if arcbase else base
 
@@ -792,7 +832,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             tar.addfile(info)
             for entry in json.loads(data.decode() or "[]"):
                 child = f"{src.rstrip('/')}/{entry}"
-                self._pull_into_tar(instance, child, tar, arcbase=arcname)
+                self._pull_into_tar(instance, child, tar, arcbase=arcname, project=project)
         elif kind == "symlink":
             info = tarfile.TarInfo(name=arcname)
             info.type = tarfile.SYMTYPE
@@ -819,6 +859,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
             return plugin_pb2.RemoveResponse()
 
         name = env.instance_name
+        project = env.project
         # Tear the container down first: deleting the instance would take
         # it with it, but only the runtime can report a container that
         # refused to die, and that is worth a log line before the
@@ -837,7 +878,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 log.exception("failed to remove the services of %s", name)
 
         try:
-            self._client.remove_instance(name)
+            self._client.remove_instance(name, project=project)
         except (httpx.HTTPError, BackendOperationError) as exc:
             context.abort(_rest_error_to_grpc(exc), f"lxd remove: {exc}")
 
@@ -846,7 +887,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # the thing Forgejo cares about, is already gone -- so it is
         # logged rather than raised. An env injected without a network
         # (e.g. a test) has an empty name, which is a no-op.
-        self._discard_network(env.network)
+        self._discard_network(env.network, project=env.project)
 
         log.info("removed environment %s", env_id)
         return plugin_pb2.RemoveResponse()

@@ -41,7 +41,20 @@ def test_create_launches_instance_from_label_arg(
     assert resp.environment_case_insensitive is False
     # Registered in the internal map.
     assert "job-1" in service._envs  # noqa: SLF001
-    mock_backend_client.get_instance.assert_called_once_with("job-1")
+    mock_backend_client.get_instance.assert_called_once_with("job-1", project=None)
+
+
+def test_create_scopes_every_call_to_the_backend_option_project(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """A ``project`` backend option scopes the instance to that LXD project."""
+    service.Create(_req(backend_options={"project": "ci"}), context)
+
+    assert mock_backend_client.launch_instance.call_args.kwargs["project"] == "ci"
+    mock_backend_client.get_instance.assert_called_once_with("job-1", project="ci")
+    assert service._envs["job-1"].project == "ci"  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
@@ -116,7 +129,7 @@ def test_create_discards_the_instance_when_the_arch_fetch_fails(
         service.Create(_req(), context)
 
     assert exc.value.code == grpc.StatusCode.INTERNAL  # type: ignore[attr-defined]
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
     assert "job-1" not in service._envs  # noqa: SLF001
 
 
@@ -171,7 +184,7 @@ def test_create_reclaims_the_network_when_the_launch_fails(
         service.Create(_req(), context)
 
     name = mock_backend_client.create_network.call_args.args[0]
-    mock_backend_client.remove_network.assert_called_once_with(name)
+    mock_backend_client.remove_network.assert_called_once_with(name, project=None)
     assert "job-1" not in service._envs  # noqa: SLF001
 
 
@@ -461,7 +474,7 @@ def test_create_removes_the_instance_when_the_job_container_fails(
     with pytest.raises(RuntimeError, match="aborted"):
         service.Create(_req(image="node:20"), context)
 
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
     assert "job-1" not in service._envs  # noqa: SLF001
 
 
@@ -576,7 +589,7 @@ def test_create_discards_the_instance_when_a_service_fails(
     with pytest.raises(aborted):
         service.Create(_req(services=[_svc()]), context)
 
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
     assert "job-1" not in service._envs  # noqa: SLF001
 
 
@@ -595,4 +608,4 @@ def test_create_rejects_services_on_an_instance_with_no_runtime(
     assert exc.value.code == grpc.StatusCode.FAILED_PRECONDITION
     # The message has to name what wanted it.
     assert "services:" in str(exc.value)
-    mock_backend_client.remove_instance.assert_called_once_with("job-1")
+    mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)

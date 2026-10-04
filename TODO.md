@@ -19,9 +19,6 @@ and `Operational` is CLI flags for the operator. Everything under
 
 ## Backend options (workflow-author-facing knobs on `CreateRequest.backend_options`)
 
-- [ ] `project`: run the instance under a named LXD project (per-tenant
-      quotas, network isolation, ACLs). Pass `project` as a query
-      parameter on each REST call; no per-project client state.
 - [ ] `type`: forward `container` or `virtual-machine` verbatim to
       `config["type"]`. Reject anything else with `INVALID_ARGUMENT`.
 - [ ] `ephemeral`: parse the usual truthy/falsy strings
