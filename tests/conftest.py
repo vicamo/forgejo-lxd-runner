@@ -16,6 +16,7 @@ Two layers are wired here:
 
 from __future__ import annotations
 
+import os
 import threading
 from concurrent import futures
 from typing import TYPE_CHECKING
@@ -137,3 +138,36 @@ def plugin_stub(
     finally:
         channel.close()
         server.stop(grace=0)
+
+
+# --- GitHub Actions log grouping ----------------------------------------
+#
+# Under Actions the whole run is a single log stream; `::group::` /
+# `::endgroup::` markers just make a span of it collapsible in the web UI.
+# Wrap each test so its live `log_cli` detail collapses per-test, while the
+# `-v` status lines and the `-rA` summary stay flat and visible. A no-op
+# anywhere but Actions, so local runs are unchanged.
+_GITHUB_ACTIONS = os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_logstart(
+    nodeid: str,
+    location: tuple[str, int | None, str],  # noqa: ARG001
+) -> Iterator[None]:
+    if _GITHUB_ACTIONS:
+        print(f"::group::{nodeid}", flush=True)
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_logfinish(
+    nodeid: str,  # noqa: ARG001
+    location: tuple[str, int | None, str],  # noqa: ARG001
+) -> Iterator[None]:
+    yield
+    if _GITHUB_ACTIONS:
+        # The -v status ("PASSED ...") is written without a trailing
+        # newline, so lead with one: a workflow command is only parsed at
+        # the start of a line.
+        print("\n::endgroup::", flush=True)

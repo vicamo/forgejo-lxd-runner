@@ -71,3 +71,12 @@ exclude = ["src/forgejo_lxd_runner/proto/"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# -v names each test as it runs; -rA prints a one-line result for every
+# outcome (passes, skips with their reason, failures) at the very end.
+addopts = "-v -rA"
+# Stream `logging` records live as each test runs. Under GitHub Actions
+# conftest.py wraps each test's output in a collapsible `::group::`, so
+# this detail stays out of the way until a test is expanded.
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
