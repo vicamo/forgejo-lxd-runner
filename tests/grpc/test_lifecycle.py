@@ -36,8 +36,12 @@ def test_create_start_remove_lifecycle(
 ) -> None:
     # Create launches the instance already running; Start only reads the
     # state back to confirm it (RUNNING status_code); Remove delegates the
-    # whole state/stop/delete dance to BackendClient.remove_instance.
-    mock_backend_client.get_instance_state.return_value = {"status_code": 103}
+    # whole state/stop/delete dance to BackendClient.remove_instance. The
+    # non-negative ``processes`` lets Create's agent-wait pass at once.
+    mock_backend_client.get_instance_state.return_value = {
+        "status_code": 103,
+        "processes": 1,
+    }
     mock_backend_client.call.return_value = {"expanded_config": {}}
     mock_backend_client.exec_capture.return_value = (0, "PATH=/usr/bin\n", "")
 

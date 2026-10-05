@@ -45,6 +45,16 @@ _RUNTIMES = ("docker", "podman")
 _DAEMON_READY_TIMEOUT = 60.0
 _DAEMON_POLL_INTERVAL = 2.0
 
+#: A virtual-machine reports Running once the hypervisor is up, but its
+#: exec/file endpoints are served by the agent *inside* the guest, which
+#: is not connected until the guest OS boots -- until then the daemon
+#: answers exec with 404. Instance state reports ``processes`` as ``-1``
+#: while no agent is connected and a real count once one is, so the same
+#: wait covers a cold VM boot and is a no-op for a container (whose agent
+#: is the daemon itself and reports ready at once).
+_AGENT_READY_TIMEOUT = 120.0
+_AGENT_READY_POLL = 2.0
+
 #: Keeps the container alive without running anything, so steps can be
 #: exec'd into it one at a time. Matches what the runner uses for its own
 #: job containers.
@@ -422,6 +432,28 @@ class ServiceSet:
 Executor = HostExecutor | ContainerExecutor
 
 
+def wait_agent_ready(client: BackendClient, instance: str, *, project: str | None = None) -> None:
+    """Block until ``instance``'s guest agent can serve exec.
+
+    A container reports ready at once; a virtual-machine only once its
+    guest OS has booted far enough to connect the agent. Instance state
+    carries ``processes`` as ``-1`` until then, so poll it rather than
+    letting the first exec race the agent and fail with a 404.
+    """
+    deadline = time.monotonic() + _AGENT_READY_TIMEOUT
+    while True:
+        state = client.get_instance_state(instance, project=project)
+        if state.get("processes", -1) >= 0:
+            return
+        if time.monotonic() >= deadline:
+            raise ExecutorError(
+                f"instance {instance!r} did not connect its agent within "
+                f"{_AGENT_READY_TIMEOUT:.0f}s",
+                precondition=True,
+            )
+        time.sleep(_AGENT_READY_POLL)
+
+
 def detect_runtime(client: BackendClient, instance: str, *, project: str | None = None) -> str:
     """Return the container runtime available inside ``instance``, or ``""``.
 
@@ -474,6 +506,7 @@ def resolve(
     ``project`` is the LXD project the instance was created under; the
     executor carries it so its instance execs land in the right place.
     """
+    wait_agent_ready(client, instance, project=project)
     runtime = detect_runtime(client, instance, project=project)
 
     if not image:

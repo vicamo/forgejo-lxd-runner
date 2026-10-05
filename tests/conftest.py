@@ -52,6 +52,11 @@ def mock_backend_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
         "architecture": "x86_64",
         "expanded_config": {"image.os": "ubuntu"},
     }
+    # Create's resolve() waits for the guest agent before the first exec,
+    # reading instance state until ``processes`` is non-negative. Default
+    # to a ready instance so tests that don't exercise the wait need not
+    # wire it up.
+    client.get_instance_state.return_value = {"processes": 1}
     factory = MagicMock(name="BackendClient", return_value=client)
     monkeypatch.setattr("forgejo_lxd_runner.server.BackendClient", factory)
     return client

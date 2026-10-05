@@ -17,6 +17,7 @@ from forgejo_lxd_runner.executor import (
     ServiceSet,
     mount_specs,
     resolve,
+    wait_agent_ready,
 )
 
 INSTANCE = "forgejo-test"
@@ -41,6 +42,9 @@ def make_client(responses: list[tuple[int, str, str]] | None = None) -> MagicMoc
         return queue.pop(0) if len(queue) > 1 else queue[0]
 
     client.exec_capture.side_effect = exec_capture
+    # resolve() waits for the guest agent before probing; default to a
+    # ready instance so the exec script is what each test exercises.
+    client.get_instance_state.return_value = {"processes": 1}
     return client
 
 
@@ -141,6 +145,55 @@ def test_resolve_gives_up_on_a_daemon_that_never_answers(
 
     assert excinfo.value.precondition is True
     assert "daemon down" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# wait_agent_ready
+
+
+def test_wait_agent_ready_returns_at_once_when_the_agent_is_connected() -> None:
+    """A container (or an already-booted VM) reports processes >= 0 now."""
+    client = make_client()
+    client.get_instance_state.return_value = {"processes": 7}
+
+    wait_agent_ready(client, INSTANCE)
+
+    client.get_instance_state.assert_called_once_with(INSTANCE, project=None)
+
+
+def test_wait_agent_ready_polls_until_the_vm_agent_connects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A VM reports processes == -1 until its guest boots; poll, don't fail."""
+    monkeypatch.setattr(executor_module.time, "sleep", lambda _: None)
+    client = make_client()
+    client.get_instance_state.side_effect = [
+        {"processes": -1},
+        {"processes": -1},
+        {"processes": 3},
+    ]
+
+    wait_agent_ready(client, INSTANCE, project="ci")
+
+    assert client.get_instance_state.call_count == 3
+    assert client.get_instance_state.call_args.kwargs["project"] == "ci"
+
+
+def test_wait_agent_ready_gives_up_on_an_agent_that_never_connects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guest that never boots must not hang a job forever."""
+    monkeypatch.setattr(executor_module.time, "sleep", lambda _: None)
+    clock = itertools.count(0.0, 1000.0)
+    monkeypatch.setattr(executor_module.time, "monotonic", lambda: next(clock))
+    client = make_client()
+    client.get_instance_state.return_value = {"processes": -1}
+
+    with pytest.raises(ExecutorError) as excinfo:
+        wait_agent_ready(client, INSTANCE)
+
+    assert excinfo.value.precondition is True
+    assert "agent" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
