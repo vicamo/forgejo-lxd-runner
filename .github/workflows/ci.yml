@@ -141,6 +141,29 @@ jobs:
           # effect within the same job.
           sudo chmod 0666 /var/lib/incus/unix.socket
 
+      - name: allow instance egress off the daemon bridge
+        # The hosted runner ships Docker, which sets the iptables FORWARD
+        # policy to DROP. That applies to every bridge, so traffic
+        # forwarded off an instance bridge toward the internet is dropped
+        # and instances cannot reach the package mirrors. The rule has to
+        # live in the FORWARD chain itself: an ACCEPT in DOCKER-USER only
+        # returns to FORWARD, which then falls through to the DROP policy,
+        # so it never unblocks a non-docker bridge. Insert at the head of
+        # FORWARD, ahead of Docker's own jumps, where an explicit ACCEPT
+        # terminates traversal before the DROP.
+        #
+        # Two bridge patterns need it: the daemon's own bridge, which the
+        # egress probe and simple jobs ride, and the per-job `flr-*`
+        # bridges the server creates for isolation (one per job, named
+        # `flr-<hex>`). The `+` is iptables' interface wildcard, so
+        # `flr-+` matches every per-job bridge at once.
+        run: |
+          bridge=${{ matrix.backend == 'lxd' && 'lxdbr0' || 'incusbr0' }}
+          for iface in "$bridge" "flr-+"; do
+            sudo iptables -I FORWARD -i "$iface" -j ACCEPT
+            sudo iptables -I FORWARD -o "$iface" -j ACCEPT
+          done
+
       - uses: actions/setup-python@v7
         with:
           # e2e only needs one interpreter; pick the newest we support.
