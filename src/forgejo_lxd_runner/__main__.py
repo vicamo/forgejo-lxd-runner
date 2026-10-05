@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import threading
 from concurrent import futures
 
 import grpc
@@ -104,16 +105,21 @@ def serve(
 
     health_service.start()
 
-    stop = server.stop(grace=5)
+    # One shutdown path: a signal sets the event, the main thread wakes
+    # and drains the server with a grace period. ``server.stop`` is only
+    # ever called here, after a signal -- never speculatively at startup.
+    stop = threading.Event()
 
     def _handle(_signum: int, _frame: object) -> None:
         log.info("shutting down")
-        health_service.stop()
-        stop.set() if hasattr(stop, "set") else server.stop(grace=5)
+        stop.set()
 
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
-    server.wait_for_termination()
+
+    stop.wait()
+    health_service.stop()
+    server.stop(grace=5).wait()
 
 
 def main() -> None:

@@ -19,11 +19,17 @@ def test_version_is_logged_at_startup(caplog) -> None:
     fake_server = MagicMock()
     fake_server.wait_for_termination.return_value = None
 
+    # serve() now blocks on a stop event until a signal arrives; make the
+    # wait return at once so the call completes without a real signal.
+    fake_event = MagicMock()
+    fake_event.wait.return_value = None
+
     with (
         patch("forgejo_lxd_runner.__main__.grpc.server", return_value=fake_server),
         patch("forgejo_lxd_runner.__main__.HealthService") as fake_checker_cls,
         patch("forgejo_lxd_runner.__main__.BackendPluginService"),
         patch("forgejo_lxd_runner.__main__.signal.signal"),
+        patch("forgejo_lxd_runner.__main__.threading.Event", return_value=fake_event),
     ):
         fake_checker_cls.return_value = MagicMock()
         with caplog.at_level(logging.INFO, logger="forgejo_lxd_runner"):
