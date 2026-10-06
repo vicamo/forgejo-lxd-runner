@@ -65,7 +65,7 @@ PYTHON_VERSIONS = _supported_pythons()
 @nox.session
 def proto(session: nox.Session) -> None:
     """Regenerate gRPC Python stubs from proto/*.proto."""
-    session.install("grpcio-tools>=1.60")
+    session.install("grpcio-tools>=1.51.1")
 
     # Wipe previously generated packages, keep the hand-written __init__.py.
     for child in PROTO_OUT.iterdir() if PROTO_OUT.exists() else []:
