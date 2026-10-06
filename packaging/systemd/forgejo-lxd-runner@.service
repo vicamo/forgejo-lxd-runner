@@ -1,0 +1,61 @@
+[Unit]
+# Template unit: one plugin process per instance name. The instance
+# name (%i) is used both as the backend --name and as the socket
+# basename, so `systemctl enable --now forgejo-lxd-runner@lxd` serves a
+# backend named "lxd" on /run/forgejo-lxd-runner/lxd.sock.
+#
+# The Forgejo Runner never spawns this process -- it dials the socket
+# below. Point the runner's config at the same path:
+#
+#   plugins:
+#     lxd:
+#       address: unix:///run/forgejo-lxd-runner/lxd.sock
+#
+# Override any default (extra flags, a different socket, a remote
+# endpoint) with a drop-in rather than editing this file:
+#
+#   systemctl edit forgejo-lxd-runner@lxd
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/bin/forgejo-lxd-runner --name %i \
+#       --address unix:///run/forgejo-lxd-runner/%i.sock \
+#       --instance-name-prefix "runner-%i-"
+#
+# (The empty ExecStart= first line is required to clear the original.)
+Description=Forgejo Runner LXD backend plugin (%i)
+Documentation=https://kernel.ubuntu.com/forgejo/vicamo/forgejo-lxd-runner
+After=network.target
+# Start after whichever daemon is present; neither is required at boot
+# because the plugin reconnects and the health poller reflects the real
+# state once the daemon appears.
+Wants=snap.lxd.daemon.service incus.service
+After=snap.lxd.daemon.service incus.service
+
+[Service]
+Type=exec
+# Binary is expected on PATH (system-wide `pip install .` or a distro
+# package). All arguments are literal here; customise via a drop-in.
+ExecStart=/usr/bin/forgejo-lxd-runner --name %i --address unix:///run/forgejo-lxd-runner/%i.sock
+Restart=on-failure
+RestartSec=2
+
+# A dedicated, transient service identity. SupplementaryGroups grants
+# access to the LXD / Incus control socket; the group whose daemon is
+# absent is simply ignored.
+DynamicUser=yes
+SupplementaryGroups=lxd incus-admin
+
+# /run/forgejo-lxd-runner, mode 0750, owned by the service identity, so
+# the unix:// socket created there has correct ownership automatically.
+RuntimeDirectory=forgejo-lxd-runner
+RuntimeDirectoryMode=0750
+
+# Hardening. The plugin only needs to write its runtime socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run/forgejo-lxd-runner
+
+[Install]
+WantedBy=multi-user.target
