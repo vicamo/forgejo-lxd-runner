@@ -57,6 +57,39 @@ def test_create_scopes_every_call_to_the_backend_option_project(
     assert service._envs["job-1"].project == "ci"  # noqa: SLF001
 
 
+def test_create_defaults_to_no_cluster_target(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """Without config, instances carry no ``?target=`` (daemon schedules)."""
+    service.Create(_req(), context)
+
+    assert mock_backend_client.launch_instance.call_args.kwargs["target"] is None
+
+
+def test_create_pins_to_daemon_wide_cluster_target(
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """``--cluster-target`` places every instance on that member by default."""
+    service = BackendPluginService(cluster_target="node1")
+    service.Create(_req(), context)
+
+    assert mock_backend_client.launch_instance.call_args.kwargs["target"] == "node1"
+
+
+def test_create_cluster_target_backend_option_overrides_daemon_default(
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+) -> None:
+    """A per-label ``cluster-target`` option wins over the daemon default."""
+    service = BackendPluginService(cluster_target="node1")
+    service.Create(_req(backend_options={"cluster-target": "node2"}), context)
+
+    assert mock_backend_client.launch_instance.call_args.kwargs["target"] == "node2"
+
+
 @pytest.mark.parametrize(
     ("reported_arch", "gha_arch"),
     [

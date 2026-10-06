@@ -110,6 +110,15 @@ def build_parser() -> argparse.ArgumentParser:
             "against the system trust store."
         ),
     )
+    p.add_argument(
+        "--cluster-target",
+        default=None,
+        help=(
+            "Default cluster member to place instances on (?target= at create "
+            "time) when the daemon is clustered. A per-label 'cluster-target' "
+            "backend option overrides this. Default: let the cluster schedule."
+        ),
+    )
     return p
 
 
@@ -124,6 +133,7 @@ def serve(
     client_cert: str | None = None,
     client_key: str | None = None,
     server_cert: str | None = None,
+    cluster_target: str | None = None,
 ) -> None:
     from .proto.plugin.v1alpha import plugin_pb2_grpc
 
@@ -138,6 +148,7 @@ def serve(
         client_cert=client_cert,
         client_key=client_key,
         server_cert=server_cert,
+        cluster_target=cluster_target,
     )
     plugin_pb2_grpc.add_BackendPluginServicer_to_server(backend_service, server)  # type: ignore[no-untyped-call]
 
@@ -184,6 +195,7 @@ def main() -> None:
         args.client_cert,
         args.client_key,
         args.tls_server_cert,
+        args.cluster_target,
     )
 
 

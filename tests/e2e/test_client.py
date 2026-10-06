@@ -289,6 +289,67 @@ def test_launch_instance_rejects_duplicate_name(client: BackendClient) -> None:
         _delete_instance(client, name)
 
 
+def _cluster_members(client: BackendClient) -> list[str]:
+    """Names of the daemon's cluster members, or ``[]`` if not clustered.
+
+    ``GET /1.0/cluster`` reports ``enabled: false`` on a standalone
+    daemon; only when clustering is on does ``GET /1.0/cluster/members``
+    list members we can target. Discovering the name here (rather than
+    hard-coding ``node1``) keeps the test working whatever the CI preseed
+    called the bootstrap member.
+    """
+    cluster = client.call("GET", "/1.0/cluster")
+    if not cluster.get("enabled"):
+        return []
+    resp = client.request("GET", "/1.0/cluster/members?recursion=1")
+    resp.raise_for_status()
+    members = resp.json().get("metadata") or []
+    # recursion=1 returns full records; server_name is the targetable id.
+    return [m["server_name"] for m in members]
+
+
+def test_launch_instance_pins_to_cluster_member(client: BackendClient) -> None:
+    """``target`` places the instance on the named member (clustered only).
+
+    Skipped on a standalone daemon, where ``?target=`` is meaningless.
+    On a cluster (even single-node) the instance must come up on the
+    requested member and report it back in its record.
+    """
+    members = _cluster_members(client)
+    if not members:
+        pytest.skip("daemon is not clustered; nothing to target")
+
+    member = members[0]
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    config = {"name": name, "source": {"type": "none"}}
+
+    try:
+        client.launch_instance(config, target=member, timeout=30.0)
+        record = client.call("GET", f"/1.0/instances/{name}")
+        assert record.get("location") == member
+    finally:
+        _delete_instance(client, name)
+
+
+def test_launch_instance_rejects_unknown_cluster_member(client: BackendClient) -> None:
+    """An unknown ``target`` is refused by the daemon (clustered only).
+
+    Locks in that a typo'd member name surfaces as an error the caller
+    can map, rather than silently falling back to cluster scheduling.
+    """
+    if not _cluster_members(client):
+        pytest.skip("daemon is not clustered; target is not validated")
+
+    name = f"forgejo-e2e-{uuid.uuid4().hex[:10]}"
+    config = {"name": name, "source": {"type": "none"}}
+
+    try:
+        with pytest.raises((BackendOperationError, httpx.HTTPStatusError)):
+            client.launch_instance(config, target="no-such-member", timeout=30.0)
+    finally:
+        _delete_instance(client, name)
+
+
 def test_launch_instance_reports_http_error_on_bad_payload(
     client: BackendClient,
 ) -> None:

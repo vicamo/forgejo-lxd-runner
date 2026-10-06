@@ -460,6 +460,7 @@ class BackendClient:
         config: dict[str, Any],
         *,
         project: str | None = None,
+        target: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """Create an instance from ``config`` and wait for it to be ready.
@@ -470,10 +471,24 @@ class BackendClient:
         operation metadata; ``httpx.HTTPStatusError`` and
         :class:`BackendOperationError` propagate so the caller can map
         them to gRPC status codes.
+
+        ``target`` pins the instance onto a named cluster member via the
+        ``?target=`` query parameter -- placement only, meaningful on a
+        clustered daemon at create time. Operations on the resulting
+        instance address it by name and are routed to its member by the
+        cluster, so ``target`` is not threaded onto later calls. ``None``
+        (the default, and the only valid value on a non-clustered daemon)
+        lets the daemon pick.
         """
 
+        params = {"target": target} if target else None
         return self.run_operation(
-            "POST", "/1.0/instances", project=project, timeout=timeout, json=config
+            "POST",
+            "/1.0/instances",
+            project=project,
+            timeout=timeout,
+            json=config,
+            params=params,
         )
 
     def get_instance_state(

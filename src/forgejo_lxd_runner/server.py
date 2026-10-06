@@ -268,6 +268,7 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         client_cert: str | None = None,
         client_key: str | None = None,
         server_cert: str | None = None,
+        cluster_target: str | None = None,
     ) -> None:
         # The name is what Forgejo runner labels reference via the
         # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
@@ -301,6 +302,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # previous 1:1 mapping. Operators set this to disambiguate multiple
         # daemons sharing one LXD project -- see ``--instance-name-prefix``.
         self._instance_name_prefix = instance_name_prefix
+        # Daemon-wide default cluster member to place instances on
+        # (``?target=`` at create time). ``None`` lets the daemon pick --
+        # the only sensible value on a non-clustered daemon. A per-label
+        # ``cluster-target`` backend option overrides this at Create time.
+        self._cluster_target = cluster_target
 
     def _effective_create_timeout(self, request: plugin_pb2.CreateRequest) -> float | None:
         """Combine runner-supplied and plugin-configured caps.
@@ -496,6 +502,12 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # later RPC scopes its calls to the same project.
         project = request.backend_options.get("project") or None
 
+        # ``cluster-target`` backend option: pin this label's instances onto a
+        # named cluster member, overriding the daemon-wide ``--cluster-target``
+        # default. Absent -> the daemon default (which may itself be ``None``,
+        # letting the cluster schedule). Placement only, applied at create.
+        cluster_target = request.backend_options.get("cluster-target") or self._cluster_target
+
         # Every job gets its own bridge so one job's instance cannot
         # reach another's -- isolation is the instance's network, not
         # anything inside it. NAT stays on so package installs at boot
@@ -562,7 +574,10 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
                 )
         try:
             self._client.launch_instance(
-                config, timeout=self._effective_create_timeout(request), project=project
+                config,
+                timeout=self._effective_create_timeout(request),
+                project=project,
+                target=cluster_target,
             )
         except BackendOperationTimeout as exc:
             # LXD may have created (and even started) the instance while

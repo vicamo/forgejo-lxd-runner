@@ -11,8 +11,6 @@ operator. Everything under `Nice-to-have` is pure planning — nothing yet.
 
 ## Operational (operator-facing CLI flags)
 
-- [ ] `--cluster-target` CLI default for LXD cluster deployments;
-      optional per-label override mechanism TBD.
 - [ ] Config file support (`--config-file`), flat single-profile form:
       name, address, workers, instance-name-prefix, plus ONE connection
       profile (endpoint + `client-cert`/`client-key` paths + default

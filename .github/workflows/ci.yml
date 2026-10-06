@@ -92,11 +92,43 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: set up LXD
+      - name: set up a single-node LXD cluster
         if: matrix.backend == 'lxd'
         uses: canonical/setup-lxd@v1
         with:
           channel: ${{ matrix.version }}
+          # A preseed with cluster.enabled turns the bootstrap node into a
+          # one-member cluster. That is enough to exercise ?target=
+          # placement end to end: a valid member name succeeds and the
+          # instance reports its location; an unknown name is refused.
+          # core.https_address must be a real address for clustering;
+          # 127.0.0.1 keeps it host-local on the ephemeral runner.
+          preseed: |
+            config:
+              core.https_address: 127.0.0.1:8443
+            cluster:
+              server_name: node1
+              enabled: true
+            networks:
+              - name: lxdbr0
+                type: bridge
+                config:
+                  ipv4.address: auto
+                  ipv6.address: none
+            storage_pools:
+              - name: default
+                driver: dir
+            profiles:
+              - name: default
+                devices:
+                  root:
+                    path: /
+                    pool: default
+                    type: disk
+                  eth0:
+                    name: eth0
+                    network: lxdbr0
+                    type: nic
 
       - name: relax LXD socket permissions
         if: matrix.backend == 'lxd'
