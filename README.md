@@ -4,7 +4,7 @@ A [Forgejo Runner](https://code.forgejo.org/forgejo/runner) act backend plugin
 that runs CI jobs inside [LXD](https://linuxcontainers.org/lxd/) instances.
 
 It implements the experimental `plugin.v1alpha.BackendPlugin` gRPC service
-introduced in [Forgejo Runner](https://code.forgejo.org/forgejo/runner) [v13.1.0](https://forgejo.org/2026-09-runner-release-v131/), so the runner can drive the LXD instance
+introduced in Forgejo Runner [v13.1.0](https://forgejo.org/2026-09-runner-release-v131/), so the runner can drive the LXD instance
 lifecycle (`Create` / `Start` / `Exec` / `CopyIn` / `CopyOut` / `Remove`) over
 a Unix or TCP socket.
 
