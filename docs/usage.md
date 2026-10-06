@@ -95,18 +95,26 @@ instance types.
 | `ephemeral` | `true`/`1`/`yes`/`on` or `false`/`0`/`no`/`off` (case-insensitive) | daemon default (non-ephemeral) | When truthy, the daemon deletes the instance as soon as it stops — a backstop for `Remove` if the instance is stopped out-of-band. A non-boolean value is rejected with `INVALID_ARGUMENT`. |
 <!-- END GENERATED: backend-options -->
 
-Example label wiring in the runner's `config.yaml`:
+Example label wiring in the runner's `config.yaml`. Backend options are the
+keys under a label's `backend-options:` mapping; the runner passes them to this
+plugin verbatim as the `backend_options` map:
 
 ```yaml
 runner:
   labels:
-    # ubuntu-minimal:24.04 image, built as a VM in the "ci" LXD project
-    - ubuntu-vm:lxd://ubuntu-minimal:24.04#type=virtual-machine,project=ci
+    ubuntu-vm:
+      # ubuntu-minimal:24.04 image, built as a VM in the "ci" LXD project
+      backend: lxd
+      backend-options:
+        image: ubuntu-minimal:24.04
+        type: virtual-machine
+        project: ci
 ```
 
-(How each label string encodes its `backend_options` is defined by the runner,
-not by this plugin; consult the Forgejo Runner documentation for the exact
-syntax your runner version expects.)
+(The label-to-`backend_options` encoding is defined by the runner, not by this
+plugin. The mapping form above is the unambiguous one; older runners also accept
+a string label with options as a `?key=value` query string. Consult the Forgejo
+Runner documentation for what your version supports.)
 
 ## Deployment (systemd)
 
