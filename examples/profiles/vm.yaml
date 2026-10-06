@@ -1,0 +1,29 @@
+description: |
+  Cloud-init configuration drive for forgejo-lxd-runner virtual machines.
+  The LXD datasource reads /dev/lxd/sock, which the guest agent creates.
+  If cloud-init runs before that socket exists, it can fall back to
+  DataSourceNone and ignore profile user-data. This NoCloud drive makes
+  the merged cloud-init configuration available from the first boot.
+
+  Apply only to virtual-machine instances, alongside a profile supplying
+  the root disk (normally default) and any provisioning profiles:
+
+      type: "virtual-machine"
+      profiles: "default,vm,base,docker"
+      system-ready: "builtin:cloud-init"
+
+  Load it into LXD or Incus:
+
+      lxc profile create vm < examples/profiles/vm.yaml
+      incus profile create vm < examples/profiles/vm.yaml
+
+  This profile does not install cloud-init, the guest agent, or a runtime.
+  Use a cloud-init-enabled VM image. The cloud-init:config disk source is
+  supported by both LXD and Incus, but cannot be used with containers.
+
+config: {}
+
+devices:
+  cloud-init:
+    type: disk
+    source: cloud-init:config
