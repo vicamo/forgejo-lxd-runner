@@ -158,6 +158,33 @@ The timeout bounds polling between completed commands; an individual blocking
 command must terminate for the budget to be enforced. Failure reports the last
 exit code and stderr or stdout, and Create cleans up the instance and network.
 
+### Cloud-init user-data missing in virtual machines
+
+For VM cloud images, cloud-init can run before the guest agent creates
+`/dev/lxd/sock`. If it falls back to `DataSourceNone`, profile user-data is
+not applied even though provisioning reports completion. Load
+[`examples/profiles/vm.yaml`](../examples/profiles/vm.yaml) to provide a
+NoCloud configuration disk available from boot:
+
+```sh
+lxc profile create vm < examples/profiles/vm.yaml
+# Or, with Incus:
+incus profile create vm < examples/profiles/vm.yaml
+```
+
+Then include it alongside the default and runtime profiles:
+
+```yaml
+type: virtual-machine
+profiles: default,vm,base,docker
+system-ready: builtin:cloud-init
+```
+
+Use a cloud-init-enabled VM image. The VM profile supplies only the
+configuration drive; it does not install cloud-init, the guest agent, or a
+runtime. Both LXD and Incus support this disk source; it cannot be applied
+to container instances.
+
 ## Metrics
 
 The daemon can expose a Prometheus metrics endpoint for operator monitoring.

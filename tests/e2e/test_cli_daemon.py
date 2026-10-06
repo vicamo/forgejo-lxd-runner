@@ -91,25 +91,33 @@ def local_image(real_client: BackendClient, instance_type: str) -> Iterator[str]
 
 
 @pytest.fixture
-def job_profiles(real_client: BackendClient, job_container: bool) -> Iterator[str]:
-    """Apply repository nesting/Docker profiles only to job-container cases."""
+def job_profiles(
+    real_client: BackendClient,
+    job_container: bool,
+    instance_type: str,
+) -> Iterator[str]:
+    """Apply runtime profiles and seed VM cloud-init before the guest agent starts."""
     import yaml
 
     names: list[str] = []
     try:
+        stems = ["vm"] if instance_type == "virtual-machine" else []
         if job_container:
-            for stem in ("base", "docker"):
-                name = f"forgejo-e2e-{stem}-{uuid.uuid4().hex[:10]}"
-                body = yaml.safe_load(
-                    (
-                        Path(__file__).resolve().parents[2]
-                        / "examples"
-                        / "profiles"
-                        / f"{stem}.yaml"
-                    ).read_text()
-                )
-                real_client.create_profile(name, config=body["config"], devices=body["devices"])
-                names.append(name)
+            stems += ["base", "docker"]
+        for stem in stems:
+            name = f"forgejo-e2e-{stem}-{uuid.uuid4().hex[:10]}"
+            body = yaml.safe_load(
+                (
+                    Path(__file__).resolve().parents[2] / "examples" / "profiles" / f"{stem}.yaml"
+                ).read_text()
+            )
+            real_client.create_profile(
+                name,
+                description=body.get("description"),
+                config=body["config"],
+                devices=body["devices"],
+            )
+            names.append(name)
         yield ",".join(["default", *names])
     finally:
         for name in reversed(names):
