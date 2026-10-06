@@ -73,6 +73,43 @@ def build_parser() -> argparse.ArgumentParser:
             "multiple daemons share one LXD project."
         ),
     )
+    p.add_argument(
+        "--endpoint",
+        default=None,
+        help=(
+            "Remote LXD/Incus HTTPS endpoint (https://host:port). When set, "
+            "the daemon is reached over mutual TLS using --client-cert and "
+            "--client-key instead of a local Unix socket. Default: autodetect "
+            "the local socket. The daemon's server certificate is verified "
+            "against the system trust store."
+        ),
+    )
+    p.add_argument(
+        "--client-cert",
+        default=None,
+        help=(
+            "Path to the PEM client certificate for mutual-TLS auth against "
+            "--endpoint. Required with --endpoint."
+        ),
+    )
+    p.add_argument(
+        "--client-key",
+        default=None,
+        help=(
+            "Path to the PEM client private key for mutual-TLS auth against "
+            "--endpoint. Required with --endpoint."
+        ),
+    )
+    p.add_argument(
+        "--tls-server-cert",
+        default=None,
+        help=(
+            "Path to a PEM certificate used to verify the remote daemon's "
+            "server certificate (pin a self-signed cert — the LXD/Incus "
+            "default). Only meaningful with --endpoint. Default: verify "
+            "against the system trust store."
+        ),
+    )
     return p
 
 
@@ -83,6 +120,10 @@ def serve(
     health_check_interval: float = 10.0,
     max_environment_timeout: float = 0.0,
     instance_name_prefix: str = "",
+    endpoint: str | None = None,
+    client_cert: str | None = None,
+    client_key: str | None = None,
+    server_cert: str | None = None,
 ) -> None:
     from .proto.plugin.v1alpha import plugin_pb2_grpc
 
@@ -93,6 +134,10 @@ def serve(
         name=name,
         max_environment_timeout=max_environment_timeout,
         instance_name_prefix=instance_name_prefix,
+        endpoint=endpoint,
+        client_cert=client_cert,
+        client_key=client_key,
+        server_cert=server_cert,
     )
     plugin_pb2_grpc.add_BackendPluginServicer_to_server(backend_service, server)  # type: ignore[no-untyped-call]
 
@@ -135,6 +180,10 @@ def main() -> None:
         args.health_check_interval,
         args.max_environment_timeout,
         args.instance_name_prefix,
+        args.endpoint,
+        args.client_cert,
+        args.client_key,
+        args.tls_server_cert,
     )
 
 

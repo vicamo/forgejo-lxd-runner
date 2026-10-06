@@ -263,6 +263,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         name: str = DEFAULT_NAME,
         max_environment_timeout: float | None = None,
         instance_name_prefix: str = "",
+        *,
+        endpoint: str | None = None,
+        client_cert: str | None = None,
+        client_key: str | None = None,
+        server_cert: str | None = None,
     ) -> None:
         # The name is what Forgejo runner labels reference via the
         # ``<label>:<name>://<arg>`` scheme. Making it configurable lets
@@ -270,9 +275,15 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # with its own connection settings — and address them
         # independently from a single runner config.
         self.name = name
-        # BackendClient autodetects the daemon's Unix socket (Incus,
-        # Snap-packaged LXD, distro LXD in that order).
-        self._client = BackendClient()
+        # Local Unix socket (autodetected: Incus, Snap LXD, distro LXD)
+        # unless an ``endpoint`` pins a remote daemon reached over
+        # mutual TLS.
+        self._client = BackendClient(
+            endpoint=endpoint,
+            client_cert=client_cert,
+            client_key=client_key,
+            server_cert=server_cert,
+        )
         self._envs: dict[str, _Env] = {}
         self._lock = threading.Lock()
         # Upper bound on how long ``Create`` will wait for LXD to finish

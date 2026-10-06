@@ -22,6 +22,7 @@ import contextlib
 import logging
 import os
 import queue
+import ssl
 import threading
 import time
 from collections.abc import Iterator
@@ -100,26 +101,86 @@ _INSTANCE_STATUS_STOPPED = 102
 class BackendClient:
     """Thin ``httpx`` wrapper over the LXD / Incus ``/1.0`` REST API.
 
+    Two connection modes, selected by which arguments are supplied:
+
+    * **Local Unix socket** (default) — talk to a daemon on this host.
+      ``socket_path`` pins one; ``None`` autodetects the first readable
+      entry in ``_DEFAULT_SOCKETS`` and raises ``BackendUnavailableError``
+      when none exists.
+    * **Remote HTTPS endpoint** — pass ``endpoint`` (``https://host:port``)
+      plus a client ``client_cert`` / ``client_key`` pair for mutual-TLS
+      auth. The daemon's server certificate is verified against
+      ``server_cert`` when pinned, else the system trust store.
+
     Parameters
     ----------
     socket_path:
-        Absolute path to the daemon's Unix socket. When ``None``, the
-        first path from ``_DEFAULT_SOCKETS`` that exists on disk is
-        picked; a missing socket raises ``BackendUnavailableError``.
+        Absolute path to the daemon's Unix socket. Ignored when
+        ``endpoint`` is given. When both are ``None`` the socket is
+        autodetected.
+    endpoint:
+        ``https://host:port`` of a remote daemon. Mutually exclusive with
+        ``socket_path``; requires ``client_cert`` and ``client_key``.
+    client_cert, client_key:
+        Paths to the PEM client certificate and private key for
+        mutual-TLS auth against ``endpoint``. Both or neither.
+    server_cert:
+        Path to a PEM certificate to verify the daemon's server cert
+        against (pin a self-signed daemon cert — the LXD/Incus default).
+        When ``None`` the system trust store is used.
     """
 
-    def __init__(self, socket_path: str | None = None) -> None:
-        if socket_path is None:
-            socket_path = _autodetect_socket()
-        self.socket_path = socket_path
-        # ``base_url`` host is arbitrary — httpx needs *something* to
-        # assemble URLs against, but the actual transport is the Unix
-        # socket, so no DNS or TCP ever happens.
-        self._http = httpx.Client(
-            transport=httpx.HTTPTransport(uds=socket_path),
-            base_url="http://localhost",
-            timeout=httpx.Timeout(30.0, connect=5.0),
-        )
+    def __init__(
+        self,
+        socket_path: str | None = None,
+        *,
+        endpoint: str | None = None,
+        client_cert: str | None = None,
+        client_key: str | None = None,
+        server_cert: str | None = None,
+    ) -> None:
+        self.socket_path: str | None
+        self.endpoint: str | None
+        self._ssl_ctx: ssl.SSLContext | None
+        if endpoint is not None:
+            if not endpoint.startswith("https://"):
+                raise ValueError(f"endpoint must be an https:// URL, got {endpoint!r}")
+            if bool(client_cert) != bool(client_key):
+                raise ValueError("client_cert and client_key must be given together")
+            if not client_cert or not client_key:
+                raise ValueError("endpoint requires client_cert and client_key for mutual TLS")
+            self.socket_path = None
+            self.endpoint = endpoint.rstrip("/")
+            # One TLS context drives both the REST client and the exec
+            # websockets: it carries the client cert/key for mutual-TLS
+            # auth and verifies the daemon's server cert. Without a pinned
+            # ``server_cert`` the system trust store is used -- a
+            # self-signed daemon cert (the LXD/Incus default) must then be
+            # pinned here or trusted out of band.
+            if server_cert is not None:
+                self._ssl_ctx = ssl.create_default_context(cafile=server_cert)
+            else:
+                self._ssl_ctx = ssl.create_default_context()
+            self._ssl_ctx.load_cert_chain(certfile=client_cert, keyfile=client_key)
+            self._http = httpx.Client(
+                base_url=self.endpoint,
+                verify=self._ssl_ctx,
+                timeout=httpx.Timeout(30.0, connect=5.0),
+            )
+        else:
+            if socket_path is None:
+                socket_path = _autodetect_socket()
+            self.socket_path = socket_path
+            self.endpoint = None
+            self._ssl_ctx = None
+            # ``base_url`` host is arbitrary — httpx needs *something* to
+            # assemble URLs against, but the actual transport is the Unix
+            # socket, so no DNS or TCP ever happens.
+            self._http = httpx.Client(
+                transport=httpx.HTTPTransport(uds=socket_path),
+                base_url="http://localhost",
+                timeout=httpx.Timeout(30.0, connect=5.0),
+            )
         # Populated lazily on first ``server_info`` call. Cached because
         # the answer is fixed for the daemon's lifetime and every
         # capability check would otherwise round-trip.
@@ -745,17 +806,39 @@ class BackendClient:
             raise BackendOperationError(f"exec operation missing fd secret {exc}") from exc
 
         def _ws(fd_secret: str) -> Any:
-            # Pre-connect a Unix socket ourselves and hand it to the
-            # ``websockets`` handshake — the ``sock=`` kwarg lets us keep
-            # ws:// URIs while talking over AF_UNIX. Always used as a
+            # Pre-connect the transport ourselves and hand the socket to
+            # the ``websockets`` handshake via ``sock=``. Always used as a
             # context manager by the callers below; ``websockets`` 15+
             # deprecates the "just call ``close()``" pattern.
             import socket as _socket
 
-            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            sock.connect(self.socket_path)
-            uri = f"ws://localhost/1.0/operations/{op_id}/websocket?secret={fd_secret}"
-            return ws_connect(uri, sock=sock, open_timeout=None, close_timeout=None)
+            if self.endpoint is None:
+                # Local Unix socket: ``sock=`` lets us keep a ws:// URI
+                # while talking over AF_UNIX.
+                sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                assert self.socket_path is not None  # noqa: S101 — unix mode invariant
+                sock.connect(self.socket_path)
+                uri = f"ws://localhost/1.0/operations/{op_id}/websocket?secret={fd_secret}"
+                return ws_connect(uri, sock=sock, open_timeout=None, close_timeout=None)
+            # Remote HTTPS endpoint: wss:// over a mutual-TLS TCP socket.
+            # Reuse the same SSL context as the REST client, so exec
+            # authenticates identically (client cert + system-trust
+            # verification of the daemon's server cert).
+            from urllib.parse import urlsplit as _urlsplit
+
+            parts = _urlsplit(self.endpoint)
+            host = parts.hostname
+            port = parts.port or 8443
+            assert host is not None  # noqa: S101 — validated https URL
+            assert self._ssl_ctx is not None  # noqa: S101 — remote mode invariant
+            uri = f"wss://{host}:{port}/1.0/operations/{op_id}/websocket?secret={fd_secret}"
+            return ws_connect(
+                uri,
+                ssl=self._ssl_ctx,
+                server_hostname=host,
+                open_timeout=None,
+                close_timeout=None,
+            )
 
         out_q: queue.Queue[tuple[str, bytes] | None] = queue.Queue()
 
