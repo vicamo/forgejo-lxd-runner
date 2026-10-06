@@ -1,5 +1,7 @@
 # forgejo-lxd-runner
 
+[![ci](https://github.com/vicamo/forgejo-lxd-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/vicamo/forgejo-lxd-runner/actions/workflows/ci.yml)
+
 A [Forgejo Runner](https://code.forgejo.org/forgejo/runner) act backend plugin
 that runs CI jobs inside [LXD](https://linuxcontainers.org/lxd/) instances.
 
