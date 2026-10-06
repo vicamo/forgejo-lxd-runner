@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forgejo-lxd-runner"
-version = "0.1.0"
+version = "0.1.0"  # x-release-please-version
 description = "Forgejo Runner act backend plugin that executes jobs in LXD instances"
 readme = "README.md"
 requires-python = ">=3.10"
