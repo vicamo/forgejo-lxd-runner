@@ -670,3 +670,51 @@ def test_create_rejects_services_on_an_instance_with_no_runtime(
     # The message has to name what wanted it.
     assert "services:" in str(exc.value)
     mock_backend_client.remove_instance.assert_called_once_with("job-1", project=None)
+
+
+def test_create_forwards_system_readiness_options(
+    service: BackendPluginService,
+    context: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = MagicMock()
+    monkeypatch.setattr("forgejo_lxd_runner.server.resolve", resolver)
+    service.Create(
+        _req(
+            backend_options={
+                "system-ready": "test -f /ready",
+                "system-ready-timeout": "42",
+            }
+        ),
+        context,
+    )
+    assert resolver.call_args.kwargs["system_ready"] == "test -f /ready"
+    assert resolver.call_args.kwargs["system_ready_timeout"] == 42
+
+
+@pytest.mark.parametrize("value", ["invalid", "-1", "0", "nan", "inf"])
+def test_create_rejects_invalid_system_ready_timeout(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    aborted: type[Exception],
+    value: str,
+) -> None:
+    with pytest.raises(aborted) as exc:
+        service.Create(_req(backend_options={"system-ready-timeout": value}), context)
+    assert exc.value.code == grpc.StatusCode.INVALID_ARGUMENT
+    mock_backend_client.launch_instance.assert_not_called()
+    mock_backend_client.create_network.assert_not_called()
+
+
+def test_create_rejects_unknown_readiness_builtin_before_allocating(
+    service: BackendPluginService,
+    context: MagicMock,
+    mock_backend_client: MagicMock,
+    aborted: type[Exception],
+) -> None:
+    with pytest.raises(aborted) as exc:
+        service.Create(_req(backend_options={"system-ready": "builtin:typo"}), context)
+    assert exc.value.code == grpc.StatusCode.INVALID_ARGUMENT
+    mock_backend_client.create_network.assert_not_called()
+    mock_backend_client.launch_instance.assert_not_called()

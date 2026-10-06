@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
 import tarfile
 import threading
@@ -32,6 +33,7 @@ import httpx
 
 from .client import BackendClient, BackendOperationError, BackendOperationTimeout
 from .executor import (
+    _SYSTEM_READY_TIMEOUT,
     ContainerExecutor,
     Executor,
     ExecutorError,
@@ -39,6 +41,7 @@ from .executor import (
     ServiceSet,
     mount_specs,
     resolve,
+    validate_system_ready,
 )
 from .proto.plugin.v1alpha import plugin_pb2, plugin_pb2_grpc
 
@@ -513,6 +516,39 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # letting the cluster schedule). Placement only, applied at create.
         cluster_target = request.backend_options.get("cluster-target") or self._cluster_target
 
+        # ``system-ready`` backend option: a shell command or readiness preset
+        # polled inside the instance before the job's runtime is probed. An image that
+        # installs its runtime at first boot (via an applied cloud-init
+        # profile, say) is not ready the instant the agent answers, so without
+        # this the first container job on a fresh instance races provisioning
+        # and fails with "no container runtime". Absent -> no wait.
+        # ``system-ready-timeout`` bounds it (seconds); absent -> the executor
+        # default.
+        system_ready = request.backend_options.get("system-ready", "")
+        try:
+            validate_system_ready(system_ready)
+        except ExecutorError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise AssertionError("unreachable") from exc
+        system_ready_timeout_raw = request.backend_options.get("system-ready-timeout", "")
+        if system_ready_timeout_raw:
+            try:
+                system_ready_timeout = float(system_ready_timeout_raw)
+            except ValueError as exc:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"system-ready-timeout: expected a number of seconds, got "
+                    f"{system_ready_timeout_raw!r}",
+                )
+                raise AssertionError("unreachable") from exc
+        else:
+            system_ready_timeout = _SYSTEM_READY_TIMEOUT
+        if not math.isfinite(system_ready_timeout) or system_ready_timeout <= 0:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "system-ready-timeout: expected a finite positive number of seconds",
+            )
+
         # Every job gets its own bridge so one job's instance cannot
         # reach another's -- isolation is the instance's network, not
         # anything inside it. NAT stays on so package installs at boot
@@ -608,7 +644,14 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # know there is anything to Remove, and the instance would be
         # left behind for an operator to find.
         try:
-            executor = resolve(self._client, lxd_name, request.image, project=project)
+            executor = resolve(
+                self._client,
+                lxd_name,
+                request.image,
+                project=project,
+                system_ready=system_ready,
+                system_ready_timeout=system_ready_timeout,
+            )
             services = self._start_services(
                 lxd_name, executor, list(request.services), project=project
             )

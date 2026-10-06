@@ -96,6 +96,8 @@ instance types.
 | ------ | ------ | ------- | ----------- |
 | `project` | project name | daemon `default` project | LXD/Incus project the instance, its network, and everything this environment owns are created in (per-tenant quotas, ACLs, isolation). |
 | `cluster-target` | cluster member name | the daemon's `--cluster-target`, else the cluster schedules | Pin this label's instances onto a named cluster member, overriding the daemon-wide `--cluster-target`. Placement only, applied at create time. |
+| `system-ready` | shell command or `builtin:` preset | empty (no wait) | Poll inside the instance until the command succeeds, before detecting the runtime or starting a job. For cloud-init profiles, use `builtin:cloud-init`; see readiness presets below. |
+| `system-ready-timeout` | positive finite seconds | `600` | Readiness polling budget. An unsuccessful command fails Create with `FAILED_PRECONDITION` and cleans up the instance. Individual command execution must also terminate for polling to enforce this budget. |
 | `profiles` | comma-separated profile names | daemon `default` profile | LXD/Incus profiles to apply to the instance. An empty string is treated as absence (the daemon applies `default`), not as "no profiles". |
 | `type` | `container` or `virtual-machine` | `container` | Instance type the daemon builds. The value is forwarded verbatim, so an unknown value yields the daemon's own error rather than a guess here. |
 | `ephemeral` | `true`/`1`/`yes`/`on` or `false`/`0`/`no`/`off` (case-insensitive) | daemon default (non-ephemeral) | When truthy, the daemon deletes the instance as soon as it stops — a backstop for `Remove` if the instance is stopped out-of-band. A non-boolean value is rejected with `INVALID_ARGUMENT`. |
@@ -121,6 +123,40 @@ runner:
 plugin. The mapping form above is the unambiguous one; older runners also accept
 a string label with options as a `?key=value` query string. Consult the Forgejo
 Runner documentation for what your version supports.)
+
+## System readiness presets
+
+Set `system-ready` to a preset name or a custom shell command. Readiness is
+checked after the instance agent answers and before runtime detection.
+
+| Preset | Ready condition |
+| --- | --- |
+| `builtin:cloud-init` | Runs `cloud-init status --wait --long`; accepts exit 0 or 2. Exit 2 logs recoverable errors as a warning. |
+| `builtin:cloud-init-strict` | Runs `cloud-init status --wait --long`; accepts only exit 0. |
+| `builtin:systemd` | Runs `systemctl is-system-running --wait`; accepts `running` or `degraded`. Degraded boot logs a warning with failed-unit diagnostics. |
+| `builtin:systemd-strict` | Runs `systemctl is-system-running --wait`; accepts only `running` with exit 0. |
+
+For example, a label's backend-options mapping can contain:
+
+```yaml
+system-ready: builtin:cloud-init
+system-ready-timeout: "600"
+```
+
+Presets describe the provisioning mechanism, so the cloud-init preset works
+for Fedora and Ubuntu images that include cloud-init. A missing required tool
+fails readiness; it is not treated as an image that needs no wait. Unknown
+`builtin:` names are rejected with `INVALID_ARGUMENT` before allocating resources.
+
+Custom shell commands require exit 0. To require cloud-init to finish without
+recoverable errors, use `builtin:cloud-init-strict` or `cloud-init status --wait`
+directly. An absent or empty
+value skips system readiness. Runtime detection still checks the container
+runtime after system readiness succeeds.
+
+The timeout bounds polling between completed commands; an individual blocking
+command must terminate for the budget to be enforced. Failure reports the last
+exit code and stderr or stdout, and Create cleans up the instance and network.
 
 ## Metrics
 
