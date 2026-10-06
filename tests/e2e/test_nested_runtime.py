@@ -279,8 +279,10 @@ def test_podman_profile_installs_a_usable_runtime(
 # ServiceContainer carries none. whoami answers HTTP on :80 unconfigured
 # and is a few MB. The probe reads from the published port with python3,
 # which every cloud image already ships (cloud-init depends on it), so
-# the test pulls exactly one image.
-_SERVICE_IMAGE = "traefik/whoami"
+# the test pulls exactly one image. It is pulled from GHCR rather than
+# Docker Hub so the test is not subject to Docker Hub's anonymous
+# pull-rate limit; GHCR is the official traefik mirror of the same image.
+_SERVICE_IMAGE = "ghcr.io/traefik/whoami"
 _SERVICE_PORT = 8080
 
 
@@ -314,8 +316,8 @@ def test_services_publish_a_port_the_instance_can_reach(
     with ``services:`` but no ``container:`` takes -- against the live
     docker daemon, then connects to the published port from inside the
     instance exactly as such a job's step would at ``localhost:<port>``.
-    Pulling ``traefik/whoami`` needs registry egress the mirror probe
-    does not cover, so an image-pull failure skips rather than fails.
+    Pulling ``whoami`` needs registry egress the mirror probe does not
+    cover, so an image-pull failure skips rather than fails.
     """
     status = nested.wait_for_cloud_init()
     assert status == "done", f"cloud-init did not finish cleanly: {nested.diagnostics()}"
@@ -370,15 +372,18 @@ def test_docker_profile_can_run_a_container(
     """The nested daemon can actually pull and run an image.
 
     Distinct from the daemon check above: a daemon can be up while
-    nesting is still too restricted to start a container. Pulling from
-    Docker Hub additionally needs registry egress, so an image-pull
-    failure skips rather than fails — the mirror probe in
-    ``_require_egress`` says nothing about Docker Hub.
+    nesting is still too restricted to start a container. Pulls a tiny
+    image from GHCR (not Docker Hub, to dodge its anonymous pull-rate
+    limit) and runs it; a genuine registry-connectivity failure still
+    skips, since ``_require_egress`` says nothing about GHCR.
     """
     status = nested.wait_for_cloud_init()
     assert status == "done", f"cloud-init did not finish cleanly: {nested.diagnostics()}"
 
-    rc, out, err = nested.sh("timeout 300 docker run --rm hello-world 2>&1")
+    marker = "forgejo-lxd-runner-can-run-a-container"
+    rc, out, err = nested.sh(
+        f"timeout 300 docker run --rm ghcr.io/containerd/busybox echo {marker} 2>&1"
+    )
     combined = f"{out}{err}"
     if rc != 0 and (
         "dial tcp" in combined or "TLS handshake" in combined or "no such host" in combined
@@ -386,4 +391,4 @@ def test_docker_profile_can_run_a_container(
         pytest.skip(f"registry unreachable from inside the instance: {combined.strip()[:300]}")
 
     assert rc == 0, f"docker run failed: rc={rc} output={combined!r}"
-    assert "Hello from Docker!" in combined
+    assert marker in combined
