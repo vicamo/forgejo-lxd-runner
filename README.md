@@ -50,7 +50,9 @@ nox -l             # list all sessions
 forgejo-lxd-runner --address unix:///run/forgejo-lxd-runner.sock
 ```
 
-Then point the runner at it via its plugin configuration.
+Then point the runner at it via its plugin configuration. See
+[`docs/usage.md`](docs/usage.md) for every command-line flag and the
+per-label backend options.
 
 ## Deploy (systemd)
 
