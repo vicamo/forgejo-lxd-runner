@@ -32,6 +32,18 @@ Forgejo Runner v13.1.0. Regenerate the Python bindings with:
 nox -s proto
 ```
 
+For distribution-provided compilers, install `protobuf-compiler`,
+`protobuf-compiler-grpc`, and `libprotobuf-dev`, then generate with:
+
+```sh
+python3 tools/generate_proto.py --system-protoc
+```
+
+The tested runtime minimums are gRPC/health-checking 1.51.1 and Python
+protobuf 4.21.12. Generate bindings with a compatible toolchain: newer
+generators can produce code that requires newer runtimes. CI checks both
+the pinned minimum versions and distribution-provided runtimes.
+
 ## Development
 
 ```sh

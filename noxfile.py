@@ -31,9 +31,6 @@ import nox
 nox.options.sessions = ["lint", "type", "tests"]
 nox.options.reuse_existing_virtualenvs = True
 
-PROTO_SRC = Path("proto")
-PROTO_OUT = Path("src/forgejo_lxd_runner/proto")
-
 
 def _supported_pythons() -> list[str]:
     """CPython X.Y series to test against.
@@ -65,46 +62,8 @@ PYTHON_VERSIONS = _supported_pythons()
 @nox.session
 def proto(session: nox.Session) -> None:
     """Regenerate gRPC Python stubs from proto/*.proto."""
-    session.install("grpcio-tools>=1.60")
-
-    # Wipe previously generated packages, keep the hand-written __init__.py.
-    for child in PROTO_OUT.iterdir() if PROTO_OUT.exists() else []:
-        if child.is_dir():
-            shutil.rmtree(child)
-
-    PROTO_OUT.mkdir(parents=True, exist_ok=True)
-    (PROTO_OUT / "__init__.py").touch()
-
-    proto_files = sorted(str(p) for p in PROTO_SRC.rglob("*.proto"))
-    if not proto_files:
-        session.error(f"no .proto files under {PROTO_SRC}/")
-
-    session.run(
-        "python",
-        "-m",
-        "grpc_tools.protoc",
-        f"-I{PROTO_SRC}",
-        f"--python_out={PROTO_OUT}",
-        f"--pyi_out={PROTO_OUT}",
-        f"--grpc_python_out={PROTO_OUT}",
-        *proto_files,
-    )
-
-    # protoc doesn't create package __init__.py files for intermediate dirs.
-    for pkg_dir in PROTO_OUT.rglob("*"):
-        if pkg_dir.is_dir():
-            (pkg_dir / "__init__.py").touch()
-
-    # protoc emits absolute imports rooted at the proto package (e.g.
-    # ``from plugin.v1alpha import plugin_pb2``). Rewrite them to be
-    # rooted at our Python package so nothing depends on sys.path shape.
-    package_prefix = ".".join(PROTO_OUT.relative_to("src").parts)
-    for py in PROTO_OUT.rglob("*_pb2*.py"):
-        text = py.read_text()
-        # Only two shapes protoc uses at import time.
-        text = text.replace("from plugin.v1alpha ", f"from {package_prefix}.plugin.v1alpha ")
-        text = text.replace("import plugin.v1alpha.", f"import {package_prefix}.plugin.v1alpha.")
-        py.write_text(text)
+    session.install("grpcio-tools>=1.51.1")
+    session.run("python", "tools/generate_proto.py")
 
 
 @nox.session

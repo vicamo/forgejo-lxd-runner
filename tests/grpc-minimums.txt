@@ -1,0 +1,7 @@
+# Keep generation and runtime versions aligned for the compatibility job.
+grpcio==1.51.1
+grpcio-health-checking==1.51.1
+grpcio-tools==1.51.1
+protobuf==4.21.12
+# grpcio-tools 1.51.1 imports pkg_resources, removed by newer setuptools.
+setuptools==78.1.1

@@ -73,6 +73,61 @@ jobs:
       - name: unit tests
         run: nox -s tests
 
+  grpc-minimums:
+    name: minimum gRPC/protobuf / py 3.11
+    runs-on: ubuntu-24.04
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/tests/grpc-minimums.txt
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install nox
+      - name: Generate bindings with the minimum toolchain
+        run: nox -s proto
+      - name: Test the minimum gRPC/protobuf runtimes
+        run: nox -s tests-3.11
+
+  distro-runtime:
+    name: distro runtimes / ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:trixie, 'ubuntu:devel']
+    container: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install distro toolchain and runtimes
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y \
+            ca-certificates git python3-pip python3-setuptools \
+            python3-wheel python3-grpcio python3-protobuf \
+            protobuf-compiler protobuf-compiler-grpc libprotobuf-dev \
+            python3-httpx python3-websockets python3-prometheus-client \
+            python3-pytest python3-pytest-asyncio
+      - uses: actions/checkout@v7
+      - name: Supply health-checking, which is not packaged by the distros
+        run: |
+          python3 -m pip install --no-deps --target /tmp/health \
+            grpcio-health-checking==1.51.1
+      - name: Generate bindings with distro tools
+        run: python3 tools/generate_proto.py --system-protoc
+      - name: Build and install against distro dependencies
+        run: |
+          python3 -m pip install --no-deps --no-build-isolation \
+            --target /tmp/runner .
+      - name: Test distro runtimes and installed CLI
+        env:
+          PYTHONPATH: /tmp/health:/tmp/runner
+        run: |
+          python3 -c 'import grpc, google.protobuf; print(grpc.__version__, google.protobuf.__version__)'
+          python3 -m pytest tests/unit tests/grpc tests/test_version.py
+          python3 -m forgejo_lxd_runner --help
+
   e2e:
     name: ${{ format('e2e / {0} {1}', matrix.backend, matrix.version) }}
     needs: discover
