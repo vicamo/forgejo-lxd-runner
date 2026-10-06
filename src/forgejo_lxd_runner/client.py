@@ -77,6 +77,16 @@ _OP_POLL_READ_MARGIN = 15
 # actually honoured.
 _OP_POLL_MIN_INTERVAL = 1.0
 
+# LXD's VM exec driver (``driver_qemu_cmd.go``) does not record two special
+# guest exit statuses as the operation's ``return``; it fails the operation
+# with these fixed messages instead. Map them back to the exit code a
+# container exec yields directly, so a non-zero exit stays a command result
+# rather than surfacing as a backend error.
+_EXEC_STATUS_ERRORS = {
+    "Command not found": 127,
+    "Command not executable": 126,
+}
+
 
 class BackendOperationTimeout(RuntimeError):
     """An async LXD / Incus operation didn't finish inside ``timeout``.
@@ -909,14 +919,37 @@ class BackendClient:
                 t_err.join(timeout=5)
 
         # Now the operation record carries the final return code.
+        yield "exit", self._exec_return_code(op_id, project=project)
+
+    def _exec_return_code(self, op_id: str, *, project: str | None = None) -> int:
+        """Resolve an exec operation's exit code from its finished record.
+
+        The operation record usually carries the guest's exit status as
+        ``return``. When it doesn't, wait on the operation once (idempotent
+        post-completion) and read ``return`` from there.
+
+        On a virtual-machine, LXD 6.x does not record two special guest
+        statuses as ``return``; its QEMU exec driver (``driver_qemu_cmd.go``)
+        converts them into a *failed* operation instead: exit 127 -> the
+        error "Command not found", exit 126 -> "Command not executable". A
+        container reports the same statuses as a plain ``return``. A non-zero
+        exit is a legitimate command result, not a backend failure -- a
+        runtime probe (`command -v docker`) relies on exit 127 meaning
+        "absent" -- so map these errors back to the exit code every other
+        path already yields rather than letting them escape.
+        """
         meta = self.call("GET", f"/1.0/operations/{op_id}", project=project)
         return_code = (meta.get("metadata") or {}).get("return")
         if return_code is None:
-            # Fall back to waiting on the operation if we somehow raced
-            # the recorded return; wait is idempotent post-completion.
-            waited = self.operation_wait({"id": op_id}, project=project)
-            return_code = waited.get("metadata", {}).get("return")
-        yield "exit", int(return_code or 0)
+            try:
+                waited = self.operation_wait({"id": op_id}, project=project)
+            except BackendOperationError as exc:
+                return_code = _EXEC_STATUS_ERRORS.get(str(exc).strip())
+                if return_code is None:
+                    raise
+            else:
+                return_code = waited.get("metadata", {}).get("return")
+        return int(return_code or 0)
 
     # ------------------------------------------------------------------
     # File transfer
