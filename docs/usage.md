@@ -108,9 +108,64 @@ runner:
 not by this plugin; consult the Forgejo Runner documentation for the exact
 syntax your runner version expects.)
 
-## Deployment
+## Deployment (systemd)
 
-See the systemd deployment walkthrough in the
-[README](../README.md#deploy-systemd): one daemon process per backend `--name`,
-each listening on its own socket, with the runner's `plugins:` block pointing at
-each socket.
+The runner never spawns this plugin — it dials the socket the plugin
+listens on. So a deployment is: run one daemon process per backend name,
+and point the runner's config at each socket.
+
+A template unit is provided in
+[`packaging/systemd/forgejo-lxd-runner@.service`](../packaging/systemd/forgejo-lxd-runner@.service).
+The instance name (`%i`) is used as both the backend `--name` and the
+socket basename, so one unit serves any number of independently-named
+backends.
+
+1. Install the package system-wide so `forgejo-lxd-runner` is on `PATH`
+   (distro package, or `sudo pip install .`).
+
+2. Install and start the unit:
+
+   ```sh
+   sudo cp packaging/systemd/forgejo-lxd-runner@.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now forgejo-lxd-runner@lxd
+   ```
+
+   This serves a backend named `lxd` on
+   `/run/forgejo-lxd-runner/lxd.sock`. The service runs under a
+   `DynamicUser` with `SupplementaryGroups=lxd incus-admin` for socket
+   access and `RuntimeDirectory=` for an owned `/run` directory — no
+   manual user or `chmod` needed.
+
+3. Customise flags with a drop-in rather than editing the unit (extra
+   arguments, a different socket, a remote mutual-TLS endpoint, a cluster
+   target):
+
+   ```sh
+   sudo systemctl edit forgejo-lxd-runner@lxd
+   ```
+   ```ini
+   [Service]
+   ExecStart=
+   ExecStart=/usr/bin/forgejo-lxd-runner --name lxd \
+       --address unix:///run/forgejo-lxd-runner/lxd.sock \
+       --instance-name-prefix "runner-lxd-"
+   ```
+
+   (The empty `ExecStart=` line clears the unit's default before the
+   replacement.)
+
+4. Point the runner at the socket in its `config.yaml`:
+
+   ```yaml
+   plugins:
+     lxd:
+       address: unix:///run/forgejo-lxd-runner/lxd.sock
+   runner:
+     labels:
+       - ubuntu-lxd:lxd://ubuntu-minimal:24.04
+   ```
+
+Serve additional backends (e.g. a separate remote daemon) by enabling
+another instance — `forgejo-lxd-runner@lxd-remote` — with its own
+drop-in and its own `plugins:` block.
