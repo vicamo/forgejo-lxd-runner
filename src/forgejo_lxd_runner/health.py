@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from grpc_health.v1 import health, health_pb2
@@ -37,10 +38,12 @@ class HealthService(health.HealthServicer):
         self,
         service: BackendPluginService,
         interval: float = DEFAULT_INTERVAL,
+        on_status: Callable[[bool], None] | None = None,
     ) -> None:
         super().__init__()
         self._service = service
         self._interval = interval
+        self._on_status = on_status
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         # Track the last status we published so we only log transitions,
@@ -103,3 +106,5 @@ class HealthService(health.HealthServicer):
             self._last = status
         self.set("", status)
         self.set(_BACKEND_SERVICE_NAME, status)
+        if self._on_status is not None:
+            self._on_status(serving)

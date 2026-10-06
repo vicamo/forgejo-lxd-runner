@@ -7,6 +7,7 @@ import logging
 import signal
 import threading
 from concurrent import futures
+from typing import Any
 
 import grpc
 from grpc_health.v1 import health_pb2_grpc
@@ -111,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--metrics-address",
+        default=None,
+        help=(
+            "Enable a Prometheus metrics HTTP endpoint on this host:port "
+            "(e.g. 127.0.0.1:9095). A bare :port binds loopback only. "
+            "Default: disabled. Requires the optional prometheus-client "
+            "dependency."
+        ),
+    )
+    p.add_argument(
         "--cluster-target",
         default=None,
         help=(
@@ -134,11 +145,24 @@ def serve(
     client_key: str | None = None,
     server_cert: str | None = None,
     cluster_target: str | None = None,
+    metrics_address: str | None = None,
 ) -> None:
     from .proto.plugin.v1alpha import plugin_pb2_grpc
 
     log.info("forgejo-lxd-runner %s starting", __version__)
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
+
+    metrics = None
+    interceptors: list[grpc.ServerInterceptor[Any, Any]] = []
+    if metrics_address is not None:
+        from .metrics import Metrics
+
+        metrics = Metrics()
+        interceptors = [metrics.interceptor()]
+
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=workers),
+        interceptors=interceptors,
+    )
 
     backend_service = BackendPluginService(
         name=name,
@@ -152,12 +176,21 @@ def serve(
     )
     plugin_pb2_grpc.add_BackendPluginServicer_to_server(backend_service, server)  # type: ignore[no-untyped-call]
 
-    health_service = HealthService(backend_service, interval=health_check_interval)
+    on_status = metrics.set_lxd_reachable if metrics is not None else None
+    health_service = HealthService(
+        backend_service,
+        interval=health_check_interval,
+        on_status=on_status,
+    )
     health_pb2_grpc.add_HealthServicer_to_server(health_service, server)
 
     server.add_insecure_port(address)
     server.start()
     log.info("forgejo-lxd-runner %r listening on %s", name, address)
+
+    if metrics is not None and metrics_address is not None:
+        metrics.track_active_environments(backend_service.environment_count)
+        metrics.serve(metrics_address)
 
     health_service.start()
 
@@ -196,6 +229,7 @@ def main() -> None:
         args.client_key,
         args.tls_server_cert,
         args.cluster_target,
+        args.metrics_address,
     )
 
 

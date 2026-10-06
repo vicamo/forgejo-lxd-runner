@@ -308,6 +308,11 @@ class BackendPluginService(plugin_pb2_grpc.BackendPluginServicer):
         # ``cluster-target`` backend option overrides this at Create time.
         self._cluster_target = cluster_target
 
+    def environment_count(self) -> int:
+        """Number of environments currently tracked. Thread-safe."""
+        with self._lock:
+            return len(self._envs)
+
     def _effective_create_timeout(self, request: plugin_pb2.CreateRequest) -> float | None:
         """Combine runner-supplied and plugin-configured caps.
 

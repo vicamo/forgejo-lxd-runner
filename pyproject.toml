@@ -27,6 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+metrics = [
+    "prometheus-client>=0.20",
+]
 dev = [
     "grpcio-tools>=1.60",
     "pytest>=8",
@@ -38,6 +41,7 @@ dev = [
     "nox>=2024.4.15",
     "pyyaml>=6.0",
     "types-pyyaml>=6.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.scripts]
