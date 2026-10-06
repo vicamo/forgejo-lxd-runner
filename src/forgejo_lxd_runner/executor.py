@@ -27,6 +27,7 @@ instance, and the container sees the result at the same path.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -54,6 +55,13 @@ _DAEMON_POLL_INTERVAL = 2.0
 #: is the daemon itself and reports ready at once).
 _AGENT_READY_TIMEOUT = 120.0
 _AGENT_READY_POLL = 2.0
+
+#: Default budget for the operator-supplied ``system-ready`` command. A
+#: first-boot provisioning run (cloud-init installing a container runtime
+#: and its dependencies) is minutes, not seconds, so the default is
+#: generous; operators tune it per label with ``system-ready-timeout``.
+_SYSTEM_READY_TIMEOUT = 600.0
+_SYSTEM_READY_POLL = 5.0
 
 #: Keeps the container alive without running anything, so steps can be
 #: exec'd into it one at a time. Matches what the runner uses for its own
@@ -454,6 +462,91 @@ def wait_agent_ready(client: BackendClient, instance: str, *, project: str | Non
         time.sleep(_AGENT_READY_POLL)
 
 
+_SYSTEM_READY_BUILTINS = {
+    "builtin:cloud-init": ["cloud-init", "status", "--wait", "--long"],
+    "builtin:cloud-init-strict": ["cloud-init", "status", "--wait", "--long"],
+    "builtin:systemd": ["systemctl", "is-system-running", "--wait"],
+    "builtin:systemd-strict": ["systemctl", "is-system-running", "--wait"],
+}
+
+
+def validate_system_ready(command: str) -> None:
+    """Reject unknown reserved preset names before allocating an instance."""
+    if command.startswith("builtin:") and command not in _SYSTEM_READY_BUILTINS:
+        raise ExecutorError(f"unknown system-ready builtin {command!r}")
+
+
+def wait_system_ready(
+    client: BackendClient,
+    instance: str,
+    command: str,
+    *,
+    timeout: float = _SYSTEM_READY_TIMEOUT,
+    project: str | None = None,
+) -> None:
+    """Block until a shell command or named readiness preset succeeds.
+
+    The agent serves exec early in boot, but an image that provisions
+    itself at first boot (cloud-init installing a container runtime, say)
+    is not done then: a job that needs what the provisioning installs
+    would race it and fail. ``command`` is the operator's definition of
+    "this instance is ready to run jobs" -- e.g. ``cloud-init status
+    --wait`` -- run through ``sh -c`` and polled until it succeeds.
+
+    ``builtin:cloud-init`` accepts completion with exit 0 or 2, logging
+    recoverable errors; ``builtin:cloud-init-strict`` requires exit 0.
+    ``builtin:systemd`` accepts running or degraded,
+    logging failed units; ``builtin:systemd-strict`` accepts only running.
+    Raw shell commands still require exit 0. Unknown builtins are rejected.
+
+    An empty ``command`` is "nothing to wait for" and returns at once, so
+    images without a provisioning layer (the common minimal case) pay
+    nothing. A command that never succeeds within ``timeout`` raises so
+    the operator sees what it was waiting on rather than a later, vaguer
+    failure.
+    """
+    validate_system_ready(command)
+    if not command:
+        return
+
+    argv = _SYSTEM_READY_BUILTINS.get(command, ["sh", "-c", command])
+    deadline = time.monotonic() + timeout
+    while True:
+        rc, out, err = client.exec_capture(instance, argv, project=project)
+        ready = rc == 0
+        warning = ""
+        if command == "builtin:cloud-init":
+            ready = rc in (0, 2)
+            if rc == 2:
+                warning = (
+                    f"cloud-init completed with recoverable errors: {out.strip()} {err.strip()}"
+                )
+        elif command in ("builtin:systemd", "builtin:systemd-strict"):
+            state = out.strip()
+            ready = rc == 0 and state == "running"
+            if command == "builtin:systemd" and rc == 1 and state == "degraded":
+                ready = True
+                _, failed, diagnostics = client.exec_capture(
+                    instance, ["systemctl", "--failed", "--no-pager", "--plain"], project=project
+                )
+                warning = (
+                    f"systemd boot completed in degraded state: "
+                    f"{failed.strip()} {diagnostics.strip()}"
+                )
+        if ready:
+            if warning:
+                logging.getLogger(__name__).warning("instance %s: %s", instance, warning)
+            return
+        if time.monotonic() >= deadline:
+            raise ExecutorError(
+                f"system-ready command {command!r} did not succeed in instance "
+                f"{instance!r} within {timeout:.0f}s (exit {rc}): "
+                f"{err.strip() or out.strip() or 'no output'}",
+                precondition=True,
+            )
+        time.sleep(_SYSTEM_READY_POLL)
+
+
 def detect_runtime(client: BackendClient, instance: str, *, project: str | None = None) -> str:
     """Return the container runtime available inside ``instance``, or ``""``.
 
@@ -492,7 +585,13 @@ def detect_runtime(client: BackendClient, instance: str, *, project: str | None 
 
 
 def resolve(
-    client: BackendClient, instance: str, image: str, *, project: str | None = None
+    client: BackendClient,
+    instance: str,
+    image: str,
+    *,
+    project: str | None = None,
+    system_ready: str = "",
+    system_ready_timeout: float = _SYSTEM_READY_TIMEOUT,
 ) -> Executor:
     """Pick the execution context for a job.
 
@@ -505,8 +604,15 @@ def resolve(
 
     ``project`` is the LXD project the instance was created under; the
     executor carries it so its instance execs land in the right place.
+
+    ``system_ready``, when set, is an operator-supplied command polled
+    until it exits 0 before the runtime is probed: an image that installs
+    its runtime at first boot is not ready the instant the agent answers,
+    and detecting the runtime before provisioning finishes would wrongly
+    report it absent.
     """
     wait_agent_ready(client, instance, project=project)
+    wait_system_ready(client, instance, system_ready, timeout=system_ready_timeout, project=project)
     runtime = detect_runtime(client, instance, project=project)
 
     if not image:

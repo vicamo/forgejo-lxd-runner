@@ -700,3 +700,102 @@ def test_project_defaults_to_none_when_unset() -> None:
 
     assert executor.project is None
     assert _exec_projects(client) == [None] * len(client.calls)
+
+
+def test_system_ready_is_polled_before_runtime_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = make_client([(1, "", "booting"), (0, "", ""), (0, "docker", "")])
+    sleep = MagicMock()
+    monkeypatch.setattr(executor_module.time, "sleep", sleep)
+    result = resolve(client, INSTANCE, "", project="tenant", system_ready="test -f /ready")
+    assert isinstance(result, HostExecutor)
+    assert client.calls[:2] == [["sh", "-c", "test -f /ready"]] * 2
+    assert "command -v docker" in client.calls[2][-1]
+    assert client.exec_capture.call_args_list[0].kwargs == {"project": "tenant"}
+    sleep.assert_called_once()
+
+
+def test_system_ready_timeout_stops_runtime_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = make_client([(1, "", "still booting")])
+    monkeypatch.setattr(
+        executor_module.time,
+        "monotonic",
+        MagicMock(side_effect=itertools.chain([0, 0], itertools.repeat(10))),
+    )
+    with pytest.raises(ExecutorError, match="still booting") as exc:
+        resolve(client, INSTANCE, "", system_ready="false", system_ready_timeout=1)
+    assert exc.value.precondition
+    assert client.calls == [["sh", "-c", "false"]]
+
+
+def test_empty_system_ready_does_not_exec() -> None:
+    client = make_client()
+    executor_module.wait_system_ready(client, INSTANCE, "")
+    client.exec_capture.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("preset", "rc", "stdout", "ready"),
+    [
+        ("cloud-init", 0, "status: done", True),
+        ("cloud-init", 2, "status: done\nrecoverable_errors: warning", True),
+        ("cloud-init", 1, "status: error", False),
+        ("cloud-init", 127, "", False),
+        ("cloud-init-strict", 0, "status: done", True),
+        ("cloud-init-strict", 2, "status: done\nrecoverable_errors: warning", False),
+        ("cloud-init-strict", 1, "status: error", False),
+        ("cloud-init-strict", 127, "", False),
+        ("systemd", 0, "running\n", True),
+        ("systemd", 1, "degraded\n", True),
+        ("systemd", 1, "starting\n", False),
+        ("systemd", 1, "maintenance\n", False),
+        ("systemd", 1, "offline\n", False),
+        ("systemd", 0, "unknown\n", False),
+        ("systemd", 127, "degraded\n", False),
+        ("systemd-strict", 0, "running\n", True),
+        ("systemd-strict", 1, "degraded\n", False),
+    ],
+)
+def test_readiness_builtin_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    preset: str,
+    rc: int,
+    stdout: str,
+    ready: bool,
+) -> None:
+    client = make_client([(rc, stdout, ""), (0, "failed-unit.service", "")])
+    monkeypatch.setattr(
+        executor_module.time,
+        "monotonic",
+        MagicMock(side_effect=itertools.chain([0], itertools.repeat(10))),
+    )
+    command = f"builtin:{preset}"
+    if ready:
+        executor_module.wait_system_ready(client, INSTANCE, command, timeout=1, project="tenant")
+    else:
+        with pytest.raises(ExecutorError, match=f"exit {rc}"):
+            executor_module.wait_system_ready(
+                client, INSTANCE, command, timeout=1, project="tenant"
+            )
+    expected = (
+        ["cloud-init", "status", "--wait", "--long"]
+        if preset in ("cloud-init", "cloud-init-strict")
+        else ["systemctl", "is-system-running", "--wait"]
+    )
+    assert client.calls[0] == expected
+    assert all(call.kwargs == {"project": "tenant"} for call in client.exec_capture.call_args_list)
+    if preset == "cloud-init" and rc == 2:
+        assert "recoverable errors" in caplog.text
+        assert "recoverable_errors: warning" in caplog.text
+    elif preset == "systemd" and stdout.strip() == "degraded" and ready:
+        assert client.calls[1] == ["systemctl", "--failed", "--no-pager", "--plain"]
+        assert "failed-unit.service" in caplog.text
+    else:
+        assert len(client.calls) == 1
+
+
+def test_unknown_builtin_is_rejected_without_execution() -> None:
+    client = make_client()
+    with pytest.raises(ExecutorError, match="unknown system-ready builtin"):
+        executor_module.wait_system_ready(client, INSTANCE, "builtin:typo")
+    client.exec_capture.assert_not_called()
