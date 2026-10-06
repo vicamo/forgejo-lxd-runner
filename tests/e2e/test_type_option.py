@@ -275,3 +275,89 @@ def test_create_leaves_a_virtual_machine_immediately_exec_able(
         code, out = _exec(plugin_stub, env_id, ["sh", "-c", "echo agent-ready"])
         assert code == 0
         assert out == "agent-ready"
+
+
+def test_vm_exec_reports_missing_command_as_exit_127_not_an_error(
+    plugin_stub: plugin_pb2_grpc.BackendPluginStub,
+    real_client: BackendClient,
+    vm_image: str,
+) -> None:
+    """A not-found command on a VM comes back as exit 127, never an error.
+
+    This is the regression guard for the LXD-6.x virtual-machine quirk:
+    its QEMU exec driver does not record a guest exit of 127/126 as the
+    operation's ``return``; it fails the exec *operation* with a fixed
+    message (``Command not found`` / ``Command not executable``). A
+    client that waits on that operation would see a
+    ``BackendOperationError`` where every other driver yields a plain
+    exit code.
+
+    ``exec_capture`` resolves both back to the exit code, so a non-zero
+    exit stays a command *result* on every driver and daemon version.
+    This matters because ``detect_runtime`` probes with
+    ``sh -c "command -v docker"`` and reads exit 127 as "runtime
+    absent"; if that raised, ``Create`` on a docker-less VM would abort
+    with ``job container: Command not found`` instead of falling back to
+    the host executor.
+
+    A VM is required: the container driver has always reported these as a
+    plain ``return``, so only the VM path exercises the conversion. The
+    assertion is a real witness -- revert the mapping in
+    ``BackendClient._exec_return_code`` and this fails with a raised
+    ``BackendOperationError``.
+    """
+    with _created(plugin_stub, real_client, vm_image, {"type": "virtual-machine"}) as env_id:
+        # A command the guest's PATH cannot resolve: exit 127.
+        rc, _out, _err = real_client.exec_capture(
+            env_id, ["this-command-does-not-exist-forgejo-e2e"]
+        )
+        assert rc == 127
+
+        # The real runtime probe takes the same path on a VM with no
+        # docker installed, and must likewise come back as 127.
+        rc, _out, _err = real_client.exec_capture(env_id, ["sh", "-c", "command -v docker"])
+        assert rc == 127
+
+
+def test_vm_exec_reports_non_executable_as_exit_126_not_an_error(
+    plugin_stub: plugin_pb2_grpc.BackendPluginStub,
+    real_client: BackendClient,
+    vm_image: str,
+) -> None:
+    """A non-executable target on a VM comes back as exit 126, never an error.
+
+    The sibling of the 127 case: LXD 6.x's QEMU exec driver maps a guest
+    exit of 126 to ``Command not executable`` and fails the operation,
+    where the container driver records it as a plain ``return``. Plant a
+    file without the execute bit and exec it directly; ``exec_capture``
+    must yield 126 rather than raising ``BackendOperationError``.
+    """
+    with _created(plugin_stub, real_client, vm_image, {"type": "virtual-machine"}) as env_id:
+        target = "/tmp/forgejo-e2e-nonexec"
+        rc, _out, _err = real_client.exec_capture(
+            env_id,
+            ["sh", "-c", f"printf '#!/bin/sh\\necho hi\\n' > {target} && chmod 0644 {target}"],
+        )
+        assert rc == 0
+
+        rc, _out, _err = real_client.exec_capture(env_id, [target])
+        assert rc == 126
+
+
+def test_container_exec_reports_missing_command_as_exit_127(
+    plugin_stub: plugin_pb2_grpc.BackendPluginStub,
+    real_client: BackendClient,
+    container_image: str,
+) -> None:
+    """The container driver reports a missing command as exit 127 too.
+
+    The container path never hit the VM-only operation-error conversion,
+    but pinning it here makes the cross-driver invariant explicit: a
+    not-found command is exit 127 on *every* driver, so a future change
+    to the exit-code resolution cannot silently diverge the two.
+    """
+    with _created(plugin_stub, real_client, container_image, {}) as env_id:
+        rc, _out, _err = real_client.exec_capture(
+            env_id, ["this-command-does-not-exist-forgejo-e2e"]
+        )
+        assert rc == 127
