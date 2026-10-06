@@ -6,6 +6,7 @@ import itertools
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from forgejo_lxd_runner import executor as executor_module
@@ -181,19 +182,72 @@ def test_wait_agent_ready_polls_until_the_vm_agent_connects(
 
 def test_wait_agent_ready_gives_up_on_an_agent_that_never_connects(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A guest that never boots must not hang a job forever."""
     monkeypatch.setattr(executor_module.time, "sleep", lambda _: None)
     clock = itertools.count(0.0, 1000.0)
     monkeypatch.setattr(executor_module.time, "monotonic", lambda: next(clock))
     client = make_client()
-    client.get_instance_state.return_value = {"processes": -1}
+    client.get_instance_state.return_value = {"processes": -1, "status": "Running"}
+    client.request.return_value = httpx.Response(
+        200, text="guest boot stalled", request=httpx.Request("GET", "http://localhost/console")
+    )
 
     with pytest.raises(ExecutorError) as excinfo:
-        wait_agent_ready(client, INSTANCE)
+        wait_agent_ready(client, INSTANCE, project="ci")
 
     assert excinfo.value.precondition is True
     assert "agent" in str(excinfo.value)
+    assert "300s" in str(excinfo.value)
+    assert "Running" in caplog.text
+    assert "guest boot stalled" in caplog.text
+    client.request.assert_called_once_with(
+        "GET", f"/1.0/instances/{INSTANCE}/console", project="ci", timeout=5.0
+    )
+
+
+def test_wait_agent_ready_allows_boots_longer_than_two_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(executor_module.time, "sleep", lambda _: None)
+    clock = iter([0.0, 121.0, 299.0])
+    monkeypatch.setattr(executor_module.time, "monotonic", lambda: next(clock))
+    client = make_client()
+    client.get_instance_state.side_effect = [
+        {"processes": -1},
+        {"processes": -1},
+        {"processes": 3},
+    ]
+
+    wait_agent_ready(client, INSTANCE)
+
+    assert client.get_instance_state.call_count == 3
+    client.request.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["unsupported", "timeout"])
+def test_wait_agent_ready_preserves_timeout_when_console_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    monkeypatch.setattr(executor_module.time, "sleep", lambda _: None)
+    clock = iter([0.0, 300.0])
+    monkeypatch.setattr(executor_module.time, "monotonic", lambda: next(clock))
+    client = make_client()
+    client.get_instance_state.return_value = {"processes": -1}
+    request = httpx.Request("GET", f"http://localhost/1.0/instances/{INSTANCE}/console")
+    if failure == "unsupported":
+        client.request.return_value = httpx.Response(400, request=request)
+    else:
+        client.request.side_effect = httpx.ReadTimeout("console read timed out", request=request)
+
+    with pytest.raises(ExecutorError, match="did not connect its agent within 300s") as excinfo:
+        wait_agent_ready(client, INSTANCE)
+
+    assert excinfo.value.precondition is True
+    assert "could not retrieve console log" in caplog.text
 
 
 # ---------------------------------------------------------------------------

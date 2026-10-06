@@ -158,6 +158,16 @@ The timeout bounds polling between completed commands; an individual blocking
 command must terminate for the budget to be enforced. Failure reports the last
 exit code and stderr or stdout, and Create cleans up the instance and network.
 
+### VM guest agent readiness
+
+Create waits up to 300 seconds for the guest agent, polling every 2 seconds,
+before checking system readiness. This wait is separate from
+`system-ready-timeout`. If the agent does not connect, the runner logs the last
+instance state and tries to retrieve the console log before removing the
+instance. Console retrieval has a 5-second HTTP timeout; the last 16,384
+characters are logged when the daemon supports VM console logs. Retrieval
+failures are logged without changing the agent-readiness error.
+
 ### Cloud-init user-data missing in virtual machines
 
 For VM cloud images, cloud-init can run before the guest agent creates
