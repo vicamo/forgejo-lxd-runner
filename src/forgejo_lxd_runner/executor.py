@@ -32,6 +32,8 @@ import re
 import time
 from dataclasses import dataclass, field
 
+import httpx
+
 from .client import BackendClient
 
 #: Runtimes we know how to drive, in probe order. Both are CLI-compatible
@@ -53,7 +55,7 @@ _DAEMON_POLL_INTERVAL = 2.0
 #: while no agent is connected and a real count once one is, so the same
 #: wait covers a cold VM boot and is a no-op for a container (whose agent
 #: is the daemon itself and reports ready at once).
-_AGENT_READY_TIMEOUT = 120.0
+_AGENT_READY_TIMEOUT = 300.0
 _AGENT_READY_POLL = 2.0
 
 #: Default budget for the operator-supplied ``system-ready`` command. A
@@ -454,6 +456,24 @@ def wait_agent_ready(client: BackendClient, instance: str, *, project: str | Non
         if state.get("processes", -1) >= 0:
             return
         if time.monotonic() >= deadline:
+            log = logging.getLogger(__name__)
+            log.warning(
+                "instance %s: guest agent readiness timed out; last state: %s", instance, state
+            )
+            # Preserve boot diagnostics before Create deletes the instance.
+            # Some daemons do not support console log retrieval for VMs.
+            try:
+                response = client.request(
+                    "GET", f"/1.0/instances/{instance}/console", project=project, timeout=5.0
+                )
+                response.raise_for_status()
+                log.warning(
+                    "instance %s: console log (last 16384 characters):\n%s",
+                    instance,
+                    response.text[-16384:] or "(empty)",
+                )
+            except httpx.HTTPError as exc:
+                log.warning("instance %s: could not retrieve console log: %s", instance, exc)
             raise ExecutorError(
                 f"instance {instance!r} did not connect its agent within "
                 f"{_AGENT_READY_TIMEOUT:.0f}s",
