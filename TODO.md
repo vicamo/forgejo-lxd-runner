@@ -22,8 +22,6 @@ operator. Everything under `Nice-to-have` is pure planning — nothing yet.
 
 ## Nice-to-have
 
-- [ ] Prometheus metrics endpoint: RPC counts, latencies, active env
-      count, LXD health status, per-remote reachability.
 - [ ] Structured logging (JSON) behind a `--log-format` flag.
 
 ## Deferred / rejected (kept here so we don't relitigate)
