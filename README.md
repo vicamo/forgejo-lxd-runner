@@ -66,6 +66,7 @@ src/forgejo_lxd_runner/  package sources
   client.py              minimal REST client for the LXD / Incus ``/1.0`` API
   executor.py            job instance execution context
   health.py              health-check gRPC service reflecting LXD reachability
+  metrics.py             opt-in Prometheus metrics endpoint and RPC interceptor
   server.py              BackendPlugin service implementation
   __main__.py            CLI entry point
 tests/                   pytest suite

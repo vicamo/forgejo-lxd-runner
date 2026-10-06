@@ -32,6 +32,52 @@ def test_serve_does_not_stop_the_server_until_a_signal_arrives() -> None:
     fake_checker.stop.assert_called_once_with()
 
 
+def test_serve_wires_metrics_when_address_is_set() -> None:
+    """--metrics-address builds the interceptor and starts the endpoint."""
+    fake_server = MagicMock()
+    fake_event = MagicMock()
+    fake_event.wait.return_value = None
+
+    with (
+        patch("forgejo_lxd_runner.__main__.grpc.server", return_value=fake_server) as fake_grpc,
+        patch("forgejo_lxd_runner.__main__.HealthService"),
+        patch("forgejo_lxd_runner.__main__.BackendPluginService"),
+        patch("forgejo_lxd_runner.__main__.signal.signal"),
+        patch("forgejo_lxd_runner.__main__.threading.Event", return_value=fake_event),
+        patch("forgejo_lxd_runner.metrics.Metrics") as fake_metrics_cls,
+    ):
+        fake_metrics = MagicMock()
+        fake_metrics_cls.return_value = fake_metrics
+        serve(
+            address="unix:///tmp/does-not-matter.sock",
+            workers=1,
+            metrics_address="127.0.0.1:9095",
+        )
+
+    # The interceptor is handed to grpc.server, and the endpoint is started.
+    assert fake_grpc.call_args.kwargs["interceptors"] == [fake_metrics.interceptor.return_value]
+    fake_metrics.serve.assert_called_once_with("127.0.0.1:9095")
+    fake_metrics.track_active_environments.assert_called_once()
+
+
+def test_serve_skips_metrics_by_default() -> None:
+    """No --metrics-address means no interceptor and no endpoint."""
+    fake_server = MagicMock()
+    fake_event = MagicMock()
+    fake_event.wait.return_value = None
+
+    with (
+        patch("forgejo_lxd_runner.__main__.grpc.server", return_value=fake_server) as fake_grpc,
+        patch("forgejo_lxd_runner.__main__.HealthService"),
+        patch("forgejo_lxd_runner.__main__.BackendPluginService"),
+        patch("forgejo_lxd_runner.__main__.signal.signal"),
+        patch("forgejo_lxd_runner.__main__.threading.Event", return_value=fake_event),
+    ):
+        serve(address="unix:///tmp/does-not-matter.sock", workers=1)
+
+    assert fake_grpc.call_args.kwargs["interceptors"] == []
+
+
 def test_serve_signal_handler_only_sets_the_stop_event() -> None:
     """SIGINT/SIGTERM must just set the event -- all teardown is on main."""
     fake_server = MagicMock()

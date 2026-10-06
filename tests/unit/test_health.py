@@ -73,3 +73,21 @@ def test_zero_interval_disables_run_loop() -> None:
     hs = HealthService(_service_with_client(MagicMock()), interval=0)
     hs.start()
     assert hs._thread is None
+
+
+def test_on_status_callback_fires_with_probe_result() -> None:
+    """An ``on_status`` hook (used to feed the metrics gauge) sees every probe."""
+    seen: list[bool] = []
+    client = MagicMock()
+    client.request.return_value = _ok_response()
+    hs = HealthService(
+        _service_with_client(client),
+        interval=0,
+        on_status=seen.append,
+    )
+
+    hs._publish(hs._probe())
+    client.request.side_effect = RuntimeError("gone")
+    hs._publish(hs._probe())
+
+    assert seen == [True, False]

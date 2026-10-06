@@ -23,6 +23,7 @@ usage: forgejo-lxd-runner [-h] [--name NAME] [--address ADDRESS]
                           [--endpoint ENDPOINT] [--client-cert CLIENT_CERT]
                           [--client-key CLIENT_KEY]
                           [--tls-server-cert TLS_SERVER_CERT]
+                          [--metrics-address METRICS_ADDRESS]
                           [--cluster-target CLUSTER_TARGET]
 
 options:
@@ -69,6 +70,11 @@ options:
                         the LXD/Incus default). Only meaningful with
                         --endpoint. Default: verify against the system trust
                         store.
+  --metrics-address METRICS_ADDRESS
+                        Enable a Prometheus metrics HTTP endpoint on this
+                        host:port (e.g. 127.0.0.1:9095). A bare :port binds
+                        loopback only. Default: disabled. Requires the
+                        optional prometheus-client dependency.
   --cluster-target CLUSTER_TARGET
                         Default cluster member to place instances on (?target=
                         at create time) when the daemon is clustered. A per-
@@ -115,6 +121,28 @@ runner:
 plugin. The mapping form above is the unambiguous one; older runners also accept
 a string label with options as a `?key=value` query string. Consult the Forgejo
 Runner documentation for what your version supports.)
+
+## Metrics
+
+The daemon can expose a Prometheus metrics endpoint for operator monitoring.
+It is disabled by default; pass `--metrics-address host:port` to enable it. A
+bare `:port` (or a host of `127.0.0.1`) binds loopback only — metrics are
+operator-facing, so widen the bind explicitly only when a remote Prometheus
+must reach it. The endpoint requires the optional `prometheus-client`
+dependency (`pip install forgejo-lxd-runner[metrics]`).
+
+```
+forgejo-lxd-runner --metrics-address 127.0.0.1:9095
+curl -s http://127.0.0.1:9095/metrics
+```
+
+Exposed series (plus the default `prometheus_client` process/platform metrics):
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `forgejo_lxd_runner_rpc_requests_total{method,code}` | counter | gRPC RPCs handled, labelled by method name and resulting status code (`OK` or a gRPC code such as `NOT_FOUND`). |
+| `forgejo_lxd_runner_lxd_reachable` | gauge | `1` if the last LXD health probe succeeded, `0` otherwise. Updated on the `--health-check-interval` cadence. |
+| `forgejo_lxd_runner_active_environments` | gauge | Environments currently tracked by the backend, evaluated at scrape time. |
 
 ## Deployment (systemd)
 
