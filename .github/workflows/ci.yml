@@ -44,13 +44,16 @@ jobs:
           arch: x64
 
   test:
-    name: nox / py ${{ matrix.python-version }}
+    name: nox / py ${{ matrix.python-version }} / ${{ matrix.dependencies }}
     needs: discover
     runs-on: ubuntu-24.04
+    env:
+      RESOLUTION: ${{ matrix.dependencies == 'minimum' && 'lowest-direct' || 'highest' }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ${{ fromJSON(needs.discover.outputs.versions) }}
+        dependencies: [minimum, latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -59,19 +62,65 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: install nox
-        run: pip install nox
+        run: pip install nox uv
+
+      - name: resolve dependency versions
+        run: |
+          python - <<'PY' > "$RUNNER_TEMP/build-requirements.txt"
+          import tomllib
+          with open("pyproject.toml", "rb") as fh:
+              project = tomllib.load(fh)
+          # Keep unbounded build tools (wheel) at their latest version.
+          for requirement in project["build-system"]["requires"]:
+              if ">=" in requirement:
+                  print(requirement)
+          for requirement in project["project"]["optional-dependencies"]["dev"]:
+              if requirement.startswith("grpcio-tools"):
+                  print(requirement)
+          PY
+          # Resolve the generator together with runtimes. On newer Python,
+          # select the earliest compatible wheels rather than build old C code.
+          uv pip compile pyproject.toml "$RUNNER_TEMP/build-requirements.txt" \
+            --extra metrics --python-version '${{ matrix.python-version }}' \
+            --resolution "$RESOLUTION" --only-binary :all: \
+            --output-file "$RUNNER_TEMP/dependency-constraints.txt"
+          echo "PIP_CONSTRAINT=$RUNNER_TEMP/dependency-constraints.txt" >> "$GITHUB_ENV"
+          echo 'PIP_UPGRADE=1' >> "$GITHUB_ENV"
+          python -c 'import sys; print(f"NOX_PYTHON={sys.version_info.major}.{sys.version_info.minor}")' >> "$GITHUB_ENV"
 
       - name: generate protobuf stubs
         run: nox -s proto
 
+      - name: align protobuf runtime with generated bindings
+        run: |
+          # grpcio-tools metadata can permit a runtime older than its gencode.
+          python - <<'PY' >> "$RUNNER_TEMP/build-requirements.txt"
+          import re
+          from pathlib import Path
+          versions = []
+          for path in Path("src/forgejo_lxd_runner/proto").rglob("*_pb2.py"):
+              match = re.search(r"^# Protobuf Python Version: (\d+\.\d+\.\d+)$", path.read_text(), re.MULTILINE)
+              if match:
+                  versions.append(tuple(map(int, match[1].split("."))))
+          # Older generators have no version header or runtime version check.
+          if versions:
+              print("protobuf>=" + ".".join(map(str, max(versions))))
+          PY
+          uv pip compile pyproject.toml "$RUNNER_TEMP/build-requirements.txt" \
+            --extra metrics --python-version '${{ matrix.python-version }}' \
+            --resolution "$RESOLUTION" --only-binary :all: \
+            --output-file "$PIP_CONSTRAINT"
+
       - name: lint
+        if: matrix.dependencies == 'latest'
         run: nox -s lint
 
       - name: type-check
+        if: matrix.dependencies == 'latest'
         run: nox -s type
 
       - name: unit tests
-        run: nox -s tests
+        run: nox -s "tests-$NOX_PYTHON"
 
   e2e:
     name: ${{ format('e2e / {0} {1}', matrix.backend, matrix.version) }}
