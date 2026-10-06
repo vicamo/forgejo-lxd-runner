@@ -4,7 +4,7 @@ A [Forgejo Runner](https://code.forgejo.org/forgejo/runner) act backend plugin
 that runs CI jobs inside [LXD](https://linuxcontainers.org/lxd/) instances.
 
 It implements the experimental `plugin.v1alpha.BackendPlugin` gRPC service
-introduced in Forgejo Runner v13.1.0, so the runner can drive the LXD instance
+introduced in [Forgejo Runner](https://code.forgejo.org/forgejo/runner) [v13.1.0](https://forgejo.org/2026-09-runner-release-v131/), so the runner can drive the LXD instance
 lifecycle (`Create` / `Start` / `Exec` / `CopyIn` / `CopyOut` / `Remove`) over
 a Unix or TCP socket.
 
@@ -41,6 +41,7 @@ nox -s fmt         # ruff check --fix + format (writes changes)
 nox -s type        # mypy
 nox -s tests       # pytest
 nox -s tests-3.12  # pytest on a specific Python version
+nox -s e2e         # pytest against a live LXD or Incus daemon
 nox -l             # list all sessions
 ```
 
@@ -60,6 +61,9 @@ backend options, and the systemd deployment walkthrough.
 proto/                  vendored .proto files
 src/forgejo_lxd_runner/  package sources
   proto/                 generated gRPC stubs (git-ignored)
+  client.py              minimal REST client for the LXD / Incus ``/1.0`` API
+  executor.py            job instance execution context
+  health.py              health-check gRPC service reflecting LXD reachability
   server.py              BackendPlugin service implementation
   __main__.py            CLI entry point
 tests/                   pytest suite
