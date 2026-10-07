@@ -48,7 +48,7 @@ dev = [
 forgejo-lxd-runner = "forgejo_lxd_runner.__main__:main"
 
 [project.urls]
-Homepage = "https://kernel.ubuntu.com/forgejo/vicamo/forgejo-lxd-runner"
+Homepage = "https://github.com/vicamo/forgejo-lxd-runner"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
